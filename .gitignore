@@ -12,6 +12,9 @@ engine-rs/target/
 # 本地数据与运行产物
 /tmp/fd-test/
 
+# 前身 Python/PySide6 版归档区（纯本地存档，只供参考，不提交 GitHub）
+archive/
+
 # 引擎回归测试的临时下载目录（tests/test_engine_rs.py 每次跑都会重建）
 tests/_tmp_rs/
 

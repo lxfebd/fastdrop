@@ -1,0 +1,68 @@
+name: CI
+
+# 每次 push 到 main、对 main 的 PR，以及手动触发，都跑一遍完整校验：
+# Rust 引擎 release 构建 + 引擎回归测试 + 前端 typecheck + 前端构建。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('engine-rs/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: engine-rs/target
+          key: cargo-build-${{ runner.os }}-${{ hashFiles('engine-rs/Cargo.lock') }}
+
+      - name: Build engine (release)
+        working-directory: engine-rs
+        run: cargo build --release
+
+      # 引擎端到端测试：纯 stdlib + 本地 HTTP，不联网，任何平台都能跑
+      - name: Engine regression tests
+        run: python3 tests/test_engine_rs.py
+
+      - name: Install app dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: app
+        run: npm run typecheck
+
+      - name: Build renderer + main
+        working-directory: app
+        run: npm run build
+
+      - name: Upload engine binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastdrop-engine-linux
+          path: engine-rs/target/release/fastdrop-engine
+          if-no-files-found: error
