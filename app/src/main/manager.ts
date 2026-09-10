@@ -118,8 +118,11 @@ export class Manager {
   private startOne(d: TaskDef): void {
     const task = new EngineTask(d.url, d.dest, d.threads, d.proxy, this.settings.user_agent)
     this.tasks.set(d.id, task)
-    // 引擎回调在子进程的 stdout 事件里触发，这里只收集快照后推送给 UI
     task.onProgress = () => this.pushProgress(d.id)
+    // 状态一变就重新看一遍调度：done/error 占着 `tasks` 但不再计入
+    // `running()`，必须在这里把腾出来的槽位还给排队任务。漏掉这一步，
+    // max_concurrent=3 下排第 4 个任务就会永远卡在「排队中」。
+    task.onState = () => this.maybeStart()
     task.run()
   }
 

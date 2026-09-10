@@ -43,6 +43,15 @@ const api: FastDropApi = {
   },
   onTaskProgress: (cb) => subscribe(Ipc.TaskProgress, cb),
   onThemeChanged: (cb) => subscribe(Ipc.ThemeChanged, cb),
+
+  // 游戏站：invoke 走主进程，推送走 subscribe
+  sitesList: () => ipcRenderer.invoke(Ipc.SitesList),
+  sitesSearch: (siteId, keyword) => ipcRenderer.invoke(Ipc.SitesSearch, siteId, keyword),
+  sitesMirrors: (siteId, detailUrl) => ipcRenderer.invoke(Ipc.SitesMirrors, siteId, detailUrl),
+  sitesResolve: (mirror) => ipcRenderer.invoke(Ipc.SitesResolve, mirror),
+  sitesAddTask: (input) => ipcRenderer.invoke(Ipc.SitesAddTask, input),
+  webviewOpenExternal: (url) => ipcRenderer.invoke(Ipc.WebviewOpenExternal, url),
+  onDownloadCaptured: (cb) => subscribe(Ipc.DownloadCaptured, cb),
 }
 
 contextBridge.exposeInMainWorld('fd', api)

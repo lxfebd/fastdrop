@@ -8,6 +8,7 @@ import {
   CaretRightFilled,
   CheckCircleOutlined,
   CloseCircleOutlined,
+  CompassOutlined,
   DownOutlined,
   HomeOutlined,
   PauseOutlined,
@@ -75,6 +76,18 @@ const counts = computed(() =>
       </button>
     </nav>
 
+    <div class="nav-label">发现</div>
+    <nav class="nav">
+      <button
+        class="nav-row"
+        :class="{ active: filter === 'games' }"
+        @click="emit('nav', 'games')"
+      >
+        <CompassOutlined class="nav-ic" />
+        <span class="nav-text">游戏站</span>
+      </button>
+    </nav>
+
     <div class="spacer" />
 
     <div class="foot">
@@ -89,46 +102,47 @@ const counts = computed(() =>
 </template>
 
 <style scoped>
+/* 侧栏是画布层的一部分（灰底），不放进白面板里 —— 它导航的是整个应用，
+   不是右侧某一列内容。右侧三个白面板各自浮在灰底上，侧栏与它们靠明度区分。 */
 .sidebar {
   flex: none;
-  width: 228px;
+  width: 232px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 14px 10px 12px;
+  gap: 12px;
+  padding: 12px;
   background: var(--ant-color-bg-layout);
-  border-right: 1px solid var(--ant-color-border-secondary);
 }
 .brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 0 2px;
+  gap: 8px;
+  padding: 4px 8px;
 }
 .logo {
-  width: 28px;
-  height: 28px;
+  flex: none;
+  width: 32px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 7px;
+  border-radius: var(--ant-radius);
   background: var(--ant-color-primary);
   color: var(--ant-color-primary-text);
-  font-size: 15px;
+  font-size: 16px;
 }
 .brand-name {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--ant-color-text);
 }
 .add-btn {
-  border-radius: 8px;
+  border-radius: var(--ant-radius);
 }
 .nav-label {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ant-color-text-tertiary);
   padding: 0 8px;
-  letter-spacing: 0.02em;
 }
 .nav {
   display: flex;
@@ -138,30 +152,32 @@ const counts = computed(() =>
 .nav-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
-  padding: 6px 8px;
+  height: 32px;
+  padding: 0 8px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--ant-radius);
   background: transparent;
   color: var(--ant-color-text-secondary);
-  font-size: 13px;
+  font-size: 14px;
   cursor: pointer;
   text-align: left;
 }
 .nav-row:hover {
-  background: var(--ant-color-fill-quaternary);
+  background: var(--ant-color-fill-panel);
   color: var(--ant-color-text);
 }
 .nav-row.active {
   background: var(--ant-color-primary-bg);
   color: var(--ant-color-primary);
+  font-weight: 500;
 }
 .nav-ic {
   flex: none;
   width: 16px;
   text-align: center;
-  font-size: 13px;
+  font-size: 14px;
 }
 .nav-text {
   flex: 1;
@@ -172,7 +188,7 @@ const counts = computed(() =>
 }
 .nav-count {
   flex: none;
-  font-size: 11px;
+  font-size: 12px;
   font-family: var(--ant-font-family-code);
   color: var(--ant-color-text-tertiary);
 }
@@ -184,20 +200,21 @@ const counts = computed(() =>
 }
 .foot {
   display: flex;
-  gap: 6px;
+  gap: 4px;
+  padding: 8px 4px 0;
 }
 .foot-btn {
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--ant-radius);
   background: transparent;
   color: var(--ant-color-text-tertiary);
   cursor: pointer;
-  font-size: 15px;
+  font-size: 16px;
   padding: 0;
 }
 .foot-btn:hover {

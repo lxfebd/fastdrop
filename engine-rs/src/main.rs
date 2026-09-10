@@ -28,10 +28,23 @@ use tokio::sync::Mutex;
 
 const CHUNK: u64 = 64 * 1024;
 const MIN_SEGMENT: u64 = 256 * 1024;
-const RETRY_BACKOFF: [u64; 5] = [1, 2, 4, 8, 16];
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
+/// TCP + TLS + 发请求的耗时上限。**不能**用 reqwest 的 `.timeout()`——那个覆盖
+/// 的是整个请求含读完响应体的总时长，任何超过 45s 的健康慢速下载都会被准时
+/// 掐断（实测：数据稳定流入中报 error decoding response body）。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// 从发请求到拿到响应头的上限。`.connect_timeout()` 只管 TCP/TLS 握手，
+/// 不管服务端处理时长，所以还得单独兜这一层。
+const HEADERS_TIMEOUT: Duration = Duration::from_secs(30);
+/// 整个探测（HEAD，失败则退回一次带 Range 的 GET）的总预算。必须比 `HEADERS_TIMEOUT`
+/// 宽一些，因为 `.send()` 的耗时包含 TCP/TLS 握手（`CONNECT_TIMEOUT` 15s），那段是从
+/// 30s 里扣的；留 10s 余量才不会让外层先超时、把内层的原因信息吞掉。
+const PROBE_TIMEOUT: Duration = Duration::from_secs(40);
+/// 相邻两段数据之间的空闲上限。真正判定「服务端死了」的开关，取代旧的整请求
+/// 超时——慢但健康的传输可以一直跑，只有真的卡住才断。
 const CHUNK_IDLE: Duration = Duration::from_secs(60);
+/// 指数退避封顶。重试次数不再封顶：下载任务应该无限重连，断多久都能续上。
+const RETRY_BACKOFF_CAP: u64 = 30;
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                           (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
@@ -222,7 +235,7 @@ struct Cmd {
 
 fn make_client(proxy: &str, user_agent: &str) -> reqwest::Client {
     let mut b = reqwest::Client::builder()
-        .timeout(CONNECT_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
         .http2_adaptive_window(true);
     if !proxy.is_empty() {
         if let Ok(p) = reqwest::Proxy::all(proxy) {
@@ -237,10 +250,28 @@ fn make_client(proxy: &str, user_agent: &str) -> reqwest::Client {
     b.default_headers(h).build().expect("http client")
 }
 
+/// 发请求并等响应头，单独封顶 `HEADERS_TIMEOUT`。
+///
+/// 不能用 reqwest 的 `.timeout()`：它把「读完整个响应体」也算进去，会掐断健康的
+/// 慢速下载。拆成「连接」「响应头」两段各自的短截止 + 正文靠 `CHUNK_IDLE` 空闲
+/// 检测，才既不误杀慢传输，也不会在永远不吐头的服务器上卡死。
+async fn send_headers(
+    req: reqwest::RequestBuilder,
+    deadline: Duration,
+) -> Result<reqwest::Response, FetchErr> {
+    match tokio::time::timeout(deadline, req.send()).await {
+        Ok(r) => r.map_err(|e| FetchErr { msg: e.to_string(), fatal: true }),
+        Err(_) => Err(FetchErr {
+            msg: format!("server did not reply within {}s", deadline.as_secs()),
+            fatal: false,
+        }),
+    }
+}
+
 /// `Accept-Ranges` is a *response* header, so echoing it in the request proves
 /// nothing. Issue one 1-byte range request and require a real `206`.
 async fn check_ranges(client: &reqwest::Client, url: &str) -> bool {
-    match client.get(url).header("Range", "bytes=0-0").send().await {
+    match send_headers(client.get(url).header("Range", "bytes=0-0"), HEADERS_TIMEOUT).await {
         Ok(resp) => {
             let st = resp.status().as_u16();
             let acc = resp
@@ -257,22 +288,47 @@ async fn check_ranges(client: &reqwest::Client, url: &str) -> bool {
 }
 
 /// Total size via HEAD, falling back to a ranged GET when HEAD is refused.
+/// Both legs share ONE `PROBE_TIMEOUT` budget instead of each carrying their own
+/// `HEADERS_TIMEOUT` — without that, a hung HEAD followed by a hung GET stacks to
+/// twice the deadline. The fallback is also skipped when HEAD merely timed out:
+/// a server that never answers HEAD won't answer GET, so the second leg just burns
+/// the whole remaining budget for nothing.
+/// Total size via HEAD, falling back to a ranged GET when HEAD is unusable.
+/// Both legs share ONE `PROBE_TIMEOUT` budget: the fallback gets whatever the first
+/// leg left, so the total can't stack past the deadline. The fallback is skipped
+/// entirely when HEAD just timed out — a host that never answers HEAD won't answer
+/// GET either, so the second leg would only burn the remaining budget for nothing.
 async fn probe_total(client: &reqwest::Client, url: &str) -> Result<u64, String> {
-    let resp = match client.head(url).send().await {
-        Ok(r) => r,
-        Err(_) => match client.get(url).header("Range", "bytes=0-0").send().await {
-            Ok(r) => r,
-            Err(e) => return Err(format!("connect: {e}")),
-        },
+    fn total_from(resp: &reqwest::Response) -> Option<u64> {
+        let cr = resp.headers().get("Content-Range").and_then(|v| v.to_str().ok()).map(str::to_owned);
+        let cd = resp.headers().get("Content-Length").and_then(|v| v.to_str().ok()).map(str::to_owned);
+        cr.as_deref().and_then(|s| s.rsplit_once('/'))
+            .and_then(|(_, t)| t.trim().parse::<u64>().ok())
+            .or_else(|| cd.as_deref().and_then(|s| s.parse::<u64>().ok()))
+            .filter(|&t| t > 0)
+    }
+
+    let started = Instant::now();
+    let head = send_headers(client.head(url), PROBE_TIMEOUT).await;
+    let resp = match head {
+        // HEAD answered successfully: use it directly.
+        Ok(r) if r.status().is_success() => r,
+        // HEAD timed out: the host isn't going to answer a ranged GET either.
+        Err(FetchErr { fatal: false, .. }) => return Err("server did not reply".to_string()),
+        // HEAD answered but wasn't usable (403/405), or send failed. Some servers
+        // refuse HEAD outright, so give a ranged GET the rest of the budget.
+        _ => {
+            let remaining = PROBE_TIMEOUT.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(format!("server did not reply within {}s", PROBE_TIMEOUT.as_secs()));
+            }
+            match send_headers(client.get(url).header("Range", "bytes=0-0"), remaining).await {
+                Ok(r) => r,
+                Err(e) => return Err(e.msg),
+            }
+        }
     };
-    let cr = resp.headers().get("Content-Range").and_then(|v| v.to_str().ok()).map(str::to_owned);
-    let cd = resp.headers().get("Content-Length").and_then(|v| v.to_str().ok()).map(str::to_owned);
-    drop(resp);
-    cr.as_deref().and_then(|s| s.rsplit_once('/'))
-        .and_then(|(_, t)| t.trim().parse::<u64>().ok())
-        .or_else(|| cd.as_deref().and_then(|s| s.parse::<u64>().ok()))
-        .filter(|&t| t > 0)
-        .ok_or_else(|| "server returned no file size".to_string())
+    total_from(&resp).ok_or_else(|| "server returned no file size".to_string())
 }
 
 /// Fetch one contiguous range and stream it straight into `file`.
@@ -281,27 +337,46 @@ async fn probe_total(client: &reqwest::Client, url: &str) -> Result<u64, String>
 /// `base` so the worker can read it directly instead of adding deltas.
 type OnProgress = Option<(Arc<AtomicU64>, u64)>;
 
+/// 状态码里哪些重试也没意义。416 意味着请求的区间已经越界（客户端算错了偏移
+/// 或文件被改了），再重试只是把同一请求重放 N 次，必须停下来。
+fn is_fatal_status(st: u16) -> bool {
+    matches!(st, 401 | 403 | 404 | 410 | 416)
+}
+
+/// 服务器声明的分片大小：优先取 `Content-Range` 的区间长度，退回 `Content-Length`。
+/// 用来判断「服务器提前断了连接」——只读到 60% 就返回 200 是常见的坑。
+fn declared_len(resp: &reqwest::Response) -> Option<u64> {
+    let cr = resp
+        .headers()
+        .get("Content-Range")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split('=').nth(1))
+        .and_then(|r| r.split('-').next())
+        .and_then(|a| a.split('-').next())
+        .and_then(|a| a.trim().parse::<u64>().ok());
+    cr.or_else(|| resp.content_length())
+}
+
 async fn fetch_and_write(
     client: &reqwest::Client,
     url: &str,
     from: u64,
     end: u64,
+    size: u64,
     file: &mut tokio::fs::File,
-    attempt: usize,
     ranges_ok: bool,
     on_progress: OnProgress,
 ) -> Result<u64, FetchErr> {
-    let resp = client
-        .get(url)
-        .header("Range", format!("bytes={from}-{end}"))
-        .send()
-        .await
-        .map_err(|e| FetchErr { msg: e.to_string(), fatal: attempt >= RETRY_BACKOFF.len() })?;
+    let resp = send_headers(
+        client.get(url).header("Range", format!("bytes={from}-{end}")),
+        HEADERS_TIMEOUT,
+    )
+    .await?;
     let st = resp.status().as_u16();
     if !(resp.status().is_success() || st == 206) {
         return Err(FetchErr {
             msg: format!("http {st}"),
-            fatal: attempt >= RETRY_BACKOFF.len(),
+            fatal: is_fatal_status(st),
         });
     }
     // When we asked for a range and got 200, the server ignored the range and
@@ -310,9 +385,10 @@ async fn fetch_and_write(
     if ranges_ok && st != 206 {
         return Err(FetchErr {
             msg: "server ignored Range request".into(),
-            fatal: attempt >= RETRY_BACKOFF.len(),
+            fatal: false,
         });
     }
+    let expect = declared_len(&resp).unwrap_or(size);
     let mut stream = resp.bytes_stream();
     let mut written = 0u64;
     let mut remaining = end - from + 1;
@@ -347,11 +423,34 @@ async fn fetch_and_write(
                     }
                 }
             }
-            Ok(Ok(None)) => break,
-            Ok(Err(e)) => {
-                return Err(FetchErr { msg: e.to_string(), fatal: attempt >= RETRY_BACKOFF.len() });
+            Ok(Ok(None)) => {
+                // 流正常结束。字节数对不上就是服务器提前断链，必须重试：
+                // 否则 worker 会以为这一段完了，把残缺的 `.part` rename 成成品。
+                if written < expect {
+                    return Err(FetchErr {
+                        msg: format!("truncated: got {written} of {expect} bytes"),
+                        fatal: false,
+                    });
+                }
+                break;
             }
-            Err(_) => return Err(FetchErr { msg: "read timeout".into(), fatal: false }),
+            Ok(Err(e)) => {
+                // 流中途炸了。能走到这里说明响应头已经拿到、body 已经开始传，所以
+                // 「声明的字节数没给够」就是截断——reqwest 对这种情况报的是
+                // `error decoding response body` 而不是干净 EOF，两种都得算。
+                // 少一个字节和整个 body 都没送来对重试策略没有区别：都是服务端
+                // 没兑现它自己声明的长度。真正连不上会走 `send_headers` 的分支。
+                if written < expect {
+                    return Err(FetchErr {
+                        msg: format!("truncated: got {written} of {expect} bytes"),
+                        fatal: false,
+                    });
+                }
+                return Err(FetchErr { msg: e.to_string(), fatal: false });
+            }
+            Err(_) => {
+                return Err(FetchErr { msg: "read timeout".into(), fatal: false });
+            }
         }
     }
     Ok(written)
@@ -379,7 +478,6 @@ async fn worker(task: Arc<Mutex<Task>>, index: usize, gen: usize) {
                 if let Some(s) = g.segments.get_mut(index) {
                     s.status = "error".into();
                 }
-                g.state = "error".into();
                 g.error = format!("open part: {e}");
             }
             return;
@@ -401,13 +499,14 @@ async fn worker(task: Arc<Mutex<Task>>, index: usize, gen: usize) {
             if let Some(s) = g.segments.get_mut(index) {
                 s.status = "error".into();
             }
-            g.state = "error".into();
             g.error = "seek failed".into();
         }
         return;
     }
 
     let mut attempt = 0usize;
+    // 连续截断次数，单独计数：`attempt` 成功就会归零，但截断是累积证据。
+    let mut trunc_streak: u32 = 0;
     let mut interval_start = Instant::now();
     let mut interval_bytes = 0u64;
 
@@ -437,7 +536,6 @@ async fn worker(task: Arc<Mutex<Task>>, index: usize, gen: usize) {
                 if let Some(s) = g.segments.get_mut(index) {
                     s.status = "error".into();
                 }
-                g.state = "error".into();
                 g.error = "seek failed".into();
             }
             return;
@@ -456,7 +554,7 @@ async fn worker(task: Arc<Mutex<Task>>, index: usize, gen: usize) {
             (Some((c.clone(), done)), c)
         };
         let fut = fetch_and_write(
-            &client, &url, from, end, &mut file, attempt, ranges_ok, progress_cb,
+            &client, &url, from, end, size, &mut file, ranges_ok, progress_cb,
         );
         tokio::pin!(fut);
         let mut progress = tokio::time::interval(PROGRESS_INTERVAL);
@@ -507,6 +605,11 @@ async fn worker(task: Arc<Mutex<Task>>, index: usize, gen: usize) {
                         s.downloaded = done.min(size);
                         s.speed = 0.0;
                     }
+                    // 重试成功后清掉刚才那条错误提示；但如果别的段还在报错就留着，
+                    // 别把别人正在失败的信号一起抹掉。
+                    if !g.any_error() {
+                        g.error = String::new();
+                    }
                 }
             }
             Err(e) => {
@@ -516,13 +619,52 @@ async fn worker(task: Arc<Mutex<Task>>, index: usize, gen: usize) {
                         if let Some(s) = g.segments.get_mut(index) {
                             s.status = "error".into();
                         }
-                        g.state = "error".into();
                         g.error = e.msg;
                     }
                     return;
                 }
-                attempt = (attempt + 1).min(RETRY_BACKOFF.len());
-                tokio::time::sleep(Duration::from_secs(RETRY_BACKOFF[attempt - 1])).await;
+                // 可恢复的错误也必须让 UI 看见：以前这里只有 fatal 分支会写
+                // `g.error`，于是断线、截断这些还在重试的情况 UI 一直是空白的，
+                // 用户根本不知道发生了什么。写成「最近一次错误」而不是终态——
+                // tick 判定终态靠的是段的 `status`，不是 `g.error`，所以这里写
+                // 了不会把任务翻成 error 态，进度照常推送。
+                let mut g = task.lock().await;
+                if g.gen == gen {
+                    g.error = e.msg.clone();
+                }
+                drop(g);
+                // 网络抖动会自愈，无限重试是对的。但截断是服务端「每次都少发」
+                // 的确定性行为——重试一万次也只会得到同样的残缺结果。所以截断
+                // 连续出现就升级成 fatal，让状态落到 error 并停止空转。2 次足以
+                // 排除偶发断链：真正会截断的服务器对每次请求都给同样的残缺结果。
+                const MAX_TRUNCATION: u32 = 2;
+                let trunc_streak = if e.msg.starts_with("truncated") {
+                    trunc_streak += 1;
+                    trunc_streak
+                } else {
+                    trunc_streak = 0;
+                    0
+                };
+                if trunc_streak >= MAX_TRUNCATION {
+                    let mut g = task.lock().await;
+                    if g.gen == gen {
+                        if let Some(s) = g.segments.get_mut(index) {
+                            s.status = "error".into();
+                        }
+                        g.error = format!("{}: server truncated every attempt", e.msg);
+                    }
+                    return;
+                }
+                // 无限重试：下载任务该断多久就能续多久。
+                attempt += 1;
+                // 指数退避封顶 30s。抖动故意只往下走（80%..100%）而不是上下抖——
+                // 抖动超过封顶就失去意义了。8 个 worker 若同时重试会一起把服务器
+                // 压死，所以按 attempt×7 + index×13 做确定性伪随机，避免引 rand。
+                let base = (1u64 << attempt.min(5)).min(RETRY_BACKOFF_CAP);
+                let phase = ((attempt * 7 + index * 13) % 5) as u64;
+                let jitter = 80 + phase * 5; // 80%..100%
+                let wait = base * jitter / 100;
+                tokio::time::sleep(Duration::from_secs(wait.max(1))).await;
             }
         }
     }

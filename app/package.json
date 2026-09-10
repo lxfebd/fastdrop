@@ -15,12 +15,6 @@
     "dist:dir": "electron-vite build && electron-builder --dir",
     "typecheck": "vue-tsc --noEmit -p tsconfig.app.json && vue-tsc --noEmit -p tsconfig.node.json"
   },
-  "dependencies": {
-    "@ant-design/icons-vue": "^7.0.1",
-    "ant-design-vue": "^4.2.6",
-    "dayjs": "^1.11.13",
-    "vue": "^3.5.13"
-  },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.1",
     "@vue/tsconfig": "^0.7.0",
@@ -29,6 +23,10 @@
     "electron-vite": "^2.3.0",
     "typescript": "~5.6.3",
     "vite": "^5.4.11",
-    "vue-tsc": "^2.1.10"
+    "vue-tsc": "^2.1.10",
+    "@ant-design/icons-vue": "^7.0.1",
+    "ant-design-vue": "^4.2.6",
+    "dayjs": "^1.11.13",
+    "vue": "^3.5.13"
   }
 }

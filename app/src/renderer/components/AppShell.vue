@@ -1,15 +1,26 @@
 <script setup lang="ts">
 /**
  * 主界面骨架。对应 fastdrop/ui_main.py 的 MainWindow：
- *   侧栏 | 工具栏 + 列表/详情分栏 | 状态栏
+ *   侧栏 | 工具栏 + 任务表 / 详情卡 | 状态栏
  *
  * 这里只做布局和动作分发，展示逻辑都在子组件里。Python 版用 QSplitter 分隔
- * 列表和详情，Web 没有内建的拖拽分栏，用固定比例 + 1px 分隔线替代——拖拽调整
+ * 列表和详情，Web 没有内建的拖拽分栏，用固定宽度 + 卡片边界替代——拖拽调整
  * 不是下载工具的核心功能，不值得为了它引一个依赖。
+ *
+ * 视觉层级（改样式前先读 theme.ts 的层级约定）：灰画布 → 白面板 → 行内表面。
+ * 三个大区域（工具栏、任务表、详情）是独立白卡浮在灰底上，靠边界产生层级，
+ * 而不是用 1px 线硬切。整窗同一色会让界面塌成一整块平面，那是初版的主要问题。
  */
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { DownOutlined, InfoCircleOutlined } from '@ant-design/icons-vue'
-import { Empty, Modal } from 'ant-design-vue'
+import {
+  CaretRightFilled,
+  DownOutlined,
+  InfoCircleOutlined,
+  PauseOutlined,
+  PlusOutlined,
+  ThunderboltFilled,
+} from '@ant-design/icons-vue'
+import { Button, Empty, Modal } from 'ant-design-vue'
 import type { Settings, TaskRow } from '../../shared/types'
 import { fmtProgress, fmtSpeed } from '../../shared/format'
 import { matchesFilter } from '../status'
@@ -19,6 +30,8 @@ import TaskRowCard from './TaskRow.vue'
 import DetailPanel from './DetailPanel.vue'
 import NewDownloadDialog from './NewDownloadDialog.vue'
 import SettingsDialog from './SettingsDialog.vue'
+import ClockLabel from './ClockLabel.vue'
+import GameSites from './GameSites.vue'
 import { useAppStore } from '../store'
 
 const store = useAppStore()
@@ -52,6 +65,15 @@ const selectedRow = computed<TaskRow | null>(() =>
   state.rows.find((r) => r.id === state.selectedId) ?? null,
 )
 
+/** 批量按钮只在有可操作对象时可用，否则空点一次白拉一趟 IPC。 */
+const hasRunning = computed(() => counts.value.downloading > 0)
+const hasRunnable = computed(
+  () =>
+    state.rows.some(
+      (r) => ['queued', 'paused', 'error', 'idle', 'cancelled'].includes(r.snap?.state ?? 'queued'),
+    ),
+)
+
 /** 状态栏左侧：正在跑的优先，其次暂停、失败。 */
 const statusLeft = computed(() => {
   const c = counts.value
@@ -69,18 +91,6 @@ const statusMid = computed(() => {
   const name = (i >= 0 ? row.def.dest.slice(i + 1) : row.def.dest) || row.def.url
   return `${name} · ${fmtProgress(row.snap.progress)}`
 })
-
-/** 状态栏右侧：走真实时钟，和老版 time.strftime 的口径一致。 */
-const clock = ref('')
-let tickTimer: ReturnType<typeof setInterval> | null = null
-
-function tick(): void {
-  const d = new Date()
-  const pad = (x: number) => String(x).padStart(2, '0')
-  clock.value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}  ${pad(
-    d.getHours(),
-  )}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-}
 
 // --------------------------------------------------------------- 对话框
 
@@ -141,6 +151,12 @@ async function onCreate(input: { url: string; dest: string; threads: number; not
   }
 }
 
+async function clearFinished(): Promise<void> {
+  await window.fd.clearFinished()
+  store.select(null)
+  await store.refreshDefs()
+}
+
 // --------------------------------------------------------------- 删除
 
 async function confirmRemove(): Promise<boolean> {
@@ -190,6 +206,10 @@ function doNav(key: string): void {
     case 'about':
       showAbout.value = true
       break
+    case 'games':
+      // 游戏站是视图而非过滤器：切到该视图，不改 filter 桶
+      store.setFilter('games')
+      break
     case 'start-all':
       window.fd.actionAll('start')
       break
@@ -233,13 +253,10 @@ function onKeydown(e: KeyboardEvent): void {
 }
 
 onMounted(() => {
-  tick()
-  tickTimer = setInterval(tick, 1000)
   window.addEventListener('keydown', onKeydown)
 })
 
 onBeforeUnmount(() => {
-  if (tickTimer) clearInterval(tickTimer)
   window.removeEventListener('keydown', onKeydown)
 })
 </script>
@@ -249,45 +266,92 @@ onBeforeUnmount(() => {
     <div class="body">
       <Sidebar :rows="state.rows" :filter="state.filter" @nav="doNav" />
 
-      <div class="right">
+      <main class="right">
+        <!-- 游戏站视图：占满右侧，不显示任务列表 -->
+        <GameSites v-if="state.filter === 'games'" />
+
+        <template v-else>
+          <!-- 工具栏：左标题与计数，右批量操作。动作按钮从这里进，侧栏只管导航与过滤 -->
         <div class="toolbar">
-          <span class="title">下载管理</span>
-          <span class="count">{{ countText }}</span>
-          <span class="spacer" />
-          <span class="speed">{{ speedText }}</span>
+          <div class="tb-left">
+            <span class="title">下载管理</span>
+            <span class="tb-sep" />
+            <span class="count">{{ countText }}</span>
+          </div>
+          <div class="tb-right">
+            <span class="speed" :class="{ idle: state.totalSpeed <= 0 }">{{ speedText }}</span>
+            <div class="tb-actions">
+              <Button type="primary" size="small" class="btn-new" @click="doNav('add')">
+                <template #icon><PlusOutlined /></template>
+                新建下载
+              </Button>
+              <Button type="text" size="small" :disabled="!hasRunning" @click="doNav('pause-all')">
+                <template #icon><PauseOutlined /></template>
+                全部暂停
+              </Button>
+              <Button type="text" size="small" :disabled="!hasRunnable" @click="doNav('start-all')">
+                <template #icon><CaretRightFilled /></template>
+                全部开始
+              </Button>
+              <Button type="text" size="small" :disabled="!counts.done" @click="clearFinished">
+                <template #icon><ThunderboltFilled /></template>
+                清空已完成
+              </Button>
+            </div>
+          </div>
         </div>
 
         <div class="split">
-          <div class="list-wrap">
-            <div v-if="filteredRows.length" class="list">
-              <TaskRowCard
-                v-for="r in filteredRows"
-                :key="r.id"
-                :def="r.def"
-                :snap="r.snap"
-                :selected="r.id === state.selectedId"
-                @select="store.select(r.id)"
-                @action="(a: string) => doAction(r.id, a)"
-              />
+          <section class="panel list-panel">
+            <!-- 表头与行共用同一套列宽，靠 padding 对齐而不是再写一遍宽度 -->
+            <div class="th">
+              <span class="c-name">名称</span>
+              <span class="c-size">大小</span>
+              <span class="c-bar" />
+              <span class="c-pct">进度</span>
+              <span class="c-spd">速度</span>
+              <span class="c-tag">状态</span>
+              <span class="c-act" />
             </div>
-            <Empty v-else class="empty" description="该分类下没有任务" />
-          </div>
+            <div class="list">
+              <template v-if="filteredRows.length">
+                <TaskRowCard
+                  v-for="r in filteredRows"
+                  :key="r.id"
+                  :def="r.def"
+                  :snap="r.snap"
+                  :selected="r.id === state.selectedId"
+                  @select="store.select(r.id)"
+                  @action="(a: string) => doAction(r.id, a)"
+                />
+              </template>
+              <div v-else class="empty-wrap">
+                <Empty description="该分类下没有任务" />
+              </div>
+            </div>
+          </section>
 
-          <div class="divider" />
-
-          <div class="detail-wrap">
-            <DetailPanel :def="selectedRow?.def ?? null" :snap="selectedRow?.snap ?? null" @add="doNav('add')" />
-          </div>
+          <section class="panel detail-panel">
+            <DetailPanel
+              :def="selectedRow?.def ?? null"
+              :snap="selectedRow?.snap ?? null"
+              @add="doNav('add')"
+            />
+          </section>
         </div>
-      </div>
+        </template>
+      </main>
     </div>
 
-    <div class="statusbar">
-      <span class="left">{{ statusLeft }}</span>
+    <footer class="statusbar">
+      <span class="left">
+        <span class="dot" :class="{ on: counts.downloading > 0 }" />
+        {{ statusLeft }}
+      </span>
       <span v-if="statusMid" class="mid">{{ statusMid }}</span>
       <span class="spacer" />
-      <span class="right-">{{ clock }}</span>
-    </div>
+      <span class="right-"><ClockLabel /></span>
+    </footer>
 
     <!-- 两个对话框都自带标题栏，所以外层 Modal 不再传 title，避免出现两行标题 -->
     <Modal
@@ -332,11 +396,12 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* 画布层：灰底。白面板浮在上面，层级靠边界而不是线条 */
 .shell {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background: var(--ant-color-bg-container);
+  background: var(--ant-color-bg-layout);
   overflow: hidden;
 }
 .body {
@@ -347,76 +412,185 @@ onBeforeUnmount(() => {
 .right {
   flex: 1;
   min-width: 0;
+  padding: 12px;
   display: flex;
   flex-direction: column;
+  gap: 12px;
 }
+
+/* ---------- 工具栏 ---------- */
 .toolbar {
   flex: none;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
-  padding: 14px 18px 12px;
+  height: 56px;
+  padding: 0 16px;
+  background: var(--ant-color-bg-container);
+  border: 1px solid var(--ant-color-border-secondary);
+  border-radius: var(--ant-radius-lg);
+}
+.tb-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
 }
 .title {
   font-size: 16px;
   font-weight: 600;
   color: var(--ant-color-text);
+  line-height: 1;
+}
+.tb-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--ant-color-border);
 }
 .count {
   font-size: 12px;
   color: var(--ant-color-text-tertiary);
   font-family: var(--ant-font-family-code);
 }
-.speed {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--ant-color-text);
-  font-family: var(--ant-font-family-code);
+.tb-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
 }
+.speed {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ant-color-text-secondary);
+  font-family: var(--ant-font-family-code);
+  padding: 4px 10px;
+  border-radius: var(--ant-radius);
+  background: var(--ant-color-fill-panel);
+}
+.speed.idle {
+  color: var(--ant-color-text-quaternary);
+  background: transparent;
+}
+.tb-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ---------- 内容分栏：左表右详情，两块独立白卡 ---------- */
 .split {
   flex: 1;
   min-height: 0;
   display: flex;
+  gap: 12px;
 }
-.list-wrap {
-  flex: 1;
-  min-width: 0;
+.panel {
+  background: var(--ant-color-bg-container);
+  border: 1px solid var(--ant-color-border-secondary);
+  border-radius: var(--ant-radius-lg);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+.list-panel {
+  flex: 1;
+  min-width: 0;
+}
+.detail-panel {
+  flex: none;
+  width: 380px;
+}
+
+/* ---------- 任务表 ---------- */
+.th {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  height: 34px;
+  background: var(--ant-color-fill-panel);
+  border-bottom-style: solid;
+  border-bottom-width: 1px;
+  border-bottom-color: var(--ant-color-border-secondary);
+  font-size: 12px;
+  color: var(--ant-color-text-tertiary);
 }
 .list {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
 }
-.empty {
-  margin: auto;
+.empty-wrap {
+  padding: 72px 0;
 }
-.divider {
+
+/* 表头列宽。行组件的 .cell-* 必须与这里一一对应，改宽度时两处一起改 */
+.c-name {
   flex: none;
-  width: 1px;
-  background: var(--ant-color-border-secondary);
-}
-.detail-wrap {
-  flex: none;
-  width: 400px;
+  width: 268px;
   min-width: 0;
-  overflow: hidden;
+  padding-left: 36px;
+  box-sizing: border-box;
 }
+.c-size {
+  flex: none;
+  width: 68px;
+  text-align: right;
+}
+.c-bar {
+  flex: 1;
+  min-width: 0;
+}
+.c-pct {
+  flex: none;
+  width: 52px;
+  text-align: right;
+}
+.c-spd {
+  flex: none;
+  width: 84px;
+  text-align: right;
+}
+.c-tag {
+  flex: none;
+  width: 86px;
+  text-align: center;
+}
+.c-act {
+  flex: none;
+  width: 120px;
+  text-align: right;
+}
+
+/* ---------- 状态栏 ---------- */
 .statusbar {
   flex: none;
-  height: 30px;
+  height: 32px;
   display: flex;
   align-items: center;
-  gap: 18px;
+  gap: 16px;
   padding: 0 16px;
   background: var(--ant-color-bg-layout);
-  border-top: 1px solid var(--ant-color-border-secondary);
+  border-top-style: solid;
+  border-top-width: 1px;
+  border-top-color: var(--ant-color-border-secondary);
   font-size: 12px;
 }
 .statusbar .left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--ant-color-text-secondary);
+}
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--ant-color-text-quaternary);
+}
+.dot.on {
+  background: var(--ant-color-primary);
 }
 .statusbar .mid,
 .statusbar .right- {
@@ -431,10 +605,12 @@ onBeforeUnmount(() => {
 .statusbar .right- {
   flex: none;
 }
+
+/* ---------- 关于 ---------- */
 .about {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
 }
 .about-head {
   display: flex;
@@ -447,13 +623,13 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 10px;
+  border-radius: var(--ant-radius);
   background: var(--ant-color-primary);
   color: var(--ant-color-primary-text);
   font-size: 20px;
 }
 .about-name {
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--ant-color-text);
 }

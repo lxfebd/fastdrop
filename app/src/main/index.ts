@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { Ipc } from '../shared/ipc'
 import { Manager } from './manager'
 import { Store } from './store'
+import { wireSites } from './sites/bridge'
 
 /**
  * 主进程自己算 preload 路径。electron-vite 不会注入 preload 的绝对路径，
@@ -41,6 +42,9 @@ function createWindow(): void {
       preload: preloadPath,
       contextIsolation: true,
       sandbox: true,
+      // 游戏页签用 <webview> 加载 gamer520/nekogal/playzip；默认关闭，只
+      // 在需要时开。webview 在沙箱化 preload 下也能用，但要显式开开关。
+      webviewTag: true,
     },
   })
 
@@ -136,6 +140,13 @@ app.whenReady().then(() => {
     initialDefs,
   )
   wireIpc()
+  // 游戏站：IPC + 捕获桥。依赖 Manager.add、当前设置（下载目录/线程数）
+  wireSites({
+    getWindow: () => win,
+    addTask: (input) => manager.add(input),
+    getDownloadDir: () => store.loadSettings().download_dir,
+    getThreads: () => store.loadSettings().threads,
+  })
   createWindow()
   createTray()
 

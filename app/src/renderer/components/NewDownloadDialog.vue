@@ -93,20 +93,20 @@ function submit(): void {
 .dlg {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
 }
 .dlg-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 .dlg-ic {
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 8px;
+  border-radius: var(--ant-radius);
   background: var(--ant-color-primary-bg);
   color: var(--ant-color-primary);
   font-size: 16px;
@@ -116,9 +116,10 @@ function submit(): void {
   font-weight: 600;
   color: var(--ant-color-text);
 }
+/* 表单区用浅底衬托，避免对话框里输入框直接浮在纯白上看不出区块 */
 .dlg-card {
-  border: 1px solid var(--ant-color-border);
-  border-radius: 8px;
+  background: var(--ant-color-fill-panel);
+  border-radius: var(--ant-radius);
   padding: 16px;
 }
 .row {
@@ -127,7 +128,7 @@ function submit(): void {
   align-items: center;
 }
 .hint {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ant-color-text-tertiary);
 }
 .mono {

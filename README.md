@@ -28,14 +28,29 @@ cd app && npm run dist     # 打包安装包
 - **速度 / 剩余时间** —— 按滑动窗口估实时速率和 ETA。
 - **任务持久化** —— 任务列表和设置存在 `~/.fastdrop/`，关窗重开还在。
 - 系统托盘、深/浅主题、代理、User-Agent 均可配置。
+- **游戏站集成** —— 内置浏览器页签缝入 gamer520 / nekogal / playzip，搜索出结果后点下载自动由本下载器接管（见下节）。
+
+## 游戏站集成
+
+侧栏「游戏站」页签内置了一个浏览器，缝入 gamer520、nekogal、playzip 三个站点。用法是：在搜索框里输关键词（三个站并行搜），点结果弹镜像列表，选一条就自动转成真实直链并进下载列表——不需要离开 FastDrop 手动操作。
+
+实现分三层，各站差异集中在最薄的一层：
+
+- **`src/main/sites/`** —— 站点适配器。每个站一个文件（`gamer520.ts` / `nekogal.ts` / `playzip.ts`），都实现 `search` 和 `mirrors` 两个函数；`registry.ts` 是唯一的注册表，**加新站只改这一个文件**，主进程和渲染层都不用动。
+- **`resolver.ts`** —— 把「镜像」换成真实可下载直链。能换的换（如 Cloudreve 网盘 → S3 预签名直链，分卷按 `.part1` 排序批量入队），换不了的交给 UI 走内嵌浏览器手动下载。
+- **`bridge.ts`** —— 下载捕获。webview 用独立会话 `persist:gamesites`（登录一次长期有效），页面上真实点击「下载」时拦下 Electron 默认的另存为（`will-download` 里 `item.cancel()`），把 URL 推给渲染层弹「添加到 FastDrop」。网盘链接是页面跳转不会触发下载，用户照常处理。
+
+设计上的明确边界：**不逆向百度/夸克/迅雷的登录与签名**——这些盘拿不到稳定直链，一律回退内嵌浏览器手动处理；需要 Cookie 会话的链接**绝不喂给 Rust 引擎**（引擎会 4xx），只喂预签名/公开直链。解析是尽力而为：站点 HTML 改版会让选择器失效，失败时返回可读的 `message`，UI 按 message 提示，不静默吞掉。
 
 ## 目录结构
 
 ```
 app/                 Electron 外壳 + Vue 前端
   src/main/          主进程：引擎子进程桥（engine.ts）、调度（manager.ts）、持久化（store.ts）
+    sites/           游戏站集成：站点注册表、各站适配器、直链解析、下载捕获桥
   src/preload/       preload：暴露 window.fd 到渲染进程
   src/renderer/      Vue 3 + Ant Design Vue：AppShell / TaskRow / SettingsDialog ...
+    components/      含 GameSites.vue（内嵌浏览器页签）
   src/shared/        主进程与渲染进程共享的类型和 IPC 频道名
   electron-builder.yml   打包配置：把引擎打进 resources/
 engine-rs/           Rust 下载引擎（独立二进制，无界面）
@@ -102,7 +117,9 @@ cd app && npm run typecheck && npm run build
 
 UI 走真实验证：用 CDP（Chrome DevTools Protocol）连渲染进程读 DOM，再直接检查数据目录里落盘的 JSON。亮/暗两套配色数值、Modal、Tabs 三个页签切换、以及打包后 `resources/` 里的引擎能否被找到，都是实测过的。
 
-当前状态：**Rust 引擎 4/4 通过，typecheck 与 build 全绿，打包后 8 线程 2MB 端到端下载通过，老格式 `~/.fastdrop/` 数据读写兼容**。
+游戏站集成也走真实验证：用 CDP 连打包产物（`release/win-unpacked`）的渲染进程，确认 preload 接口齐全、`<webview>` 真触发 `dom-ready`，并跑通完整链路——nekogal 详情 → golink 解码 → Cloudreve 列目录 → S3 预签名直链（4 分卷、顺序正确）。验证用隔离的 `--user-data-dir`，不碰 `~/.fastdrop`。
+
+当前状态：**Rust 引擎 4/4 通过，typecheck 与 build 全绿，打包后 8 线程端到端下载通过，游戏站全链路（网盘→直链→分卷入队）在打包态验证通过，老格式 `~/.fastdrop/` 数据读写兼容**。
 
 ## 依赖
 

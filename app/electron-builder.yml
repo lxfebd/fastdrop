@@ -18,10 +18,16 @@ directories:
 electronDist: node_modules/electron/dist
 
 files:
-  # 只打打包产物本身，不要连 src/、测试、探针一起塞进安装包
+  # 只打打包产物本身，不要连 src/、测试、探针一起塞进安装包。
+  #
+  # 注意这里**故意没有** node_modules。electron-vite 已经把 vue、antd-vue、
+  # dayjs、icons 全量打进 out/renderer/assets/（渲染产物是单文件 bundle，
+  # 里面没有任何外部 import；out/main 和 out/preload 也只 require electron
+  # 和 node: 内置模块）。运行时完全不解析 node_modules，把它一起打包纯粹是
+  # 白白多出 66 MB 的 ant-design-vue 全量 locale + TS 声明。
+  # 之前那行 `- node_modules/**/*` 让 asar 从 27 MB 膨胀到 93 MB。
   - out/**/*
   - package.json
-  - node_modules/**/*
 
 extraResources:
   - from: ../engine-rs/target/release/fastdrop-engine.exe

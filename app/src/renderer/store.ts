@@ -7,7 +7,7 @@
  */
 import { reactive } from 'vue'
 import type { FastDropApi } from '../shared/ipc'
-import type { Settings, TaskDef, TaskRow, TaskSnapshot } from '../shared/types'
+import type { Settings, TaskDef, TaskRow } from '../shared/types'
 
 declare global {
   interface Window {
@@ -15,7 +15,12 @@ declare global {
   }
 }
 
-const REFRESH_MS = 1000
+// 兜底轮询周期。引擎本来每 100ms 主动推一次进度（onTaskProgress 里直接
+// 合并进快照），所以这个轮询只是防丢失用的保险，不是 UI 的更新来源。
+// 1s 一次是浪费：每次都是全量 IPC 重拉 + state.rows 整体替换（新对象走
+// v-for key 重建整行）+ filteredRows/counts 全部失效重算，还会和推送打架
+// 让进度条跳。5s 足够发现「推送链路断了」，代价降到五分之一。
+const REFRESH_MS = 5000
 
 interface AppState {
   ready: boolean
@@ -24,8 +29,6 @@ interface AppState {
   defs: TaskDef[]
   /** 列表 UI 用的行数据：定义 + 实时快照（引擎未启动时为 null） */
   rows: TaskRow[]
-  /** 事件推送维护的快照缓存，进度回调直接落到这里 */
-  snapshots: Record<string, TaskSnapshot>
   /** 全速合计，和老版状态栏口径一致 */
   totalSpeed: number
   /** 侧栏过滤条件，对应老版 _filter */
@@ -39,7 +42,6 @@ const state: AppState = reactive({
   settings: null,
   defs: [],
   rows: [],
-  snapshots: {},
   totalSpeed: 0,
   filter: 'all',
   selectedId: null,
@@ -50,10 +52,6 @@ async function refreshDefs(): Promise<void> {
   try {
     state.rows = await window.fd.listTasks()
     state.defs = state.rows.map((r) => r.def)
-    // 轮询回来的快照也进缓存，保证列表行不依赖推送时机的先后
-    for (const r of state.rows) {
-      if (r.snap) state.snapshots[r.id] = r.snap
-    }
     state.totalSpeed = state.rows.reduce(
       (sum, r) => sum + (r.snap?.state === 'downloading' ? r.snap.speed : 0),
       0,
@@ -74,7 +72,6 @@ async function init(): Promise<void> {
   state.ready = true
 
   window.fd.onTaskProgress((p) => {
-    state.snapshots[p.taskId] = p.snapshot
     const row = state.rows.find((r) => r.id === p.taskId)
     if (row) row.snap = p.snapshot
   })

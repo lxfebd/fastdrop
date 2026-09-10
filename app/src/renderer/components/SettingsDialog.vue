@@ -96,16 +96,17 @@ function save(): void {
 .dlg {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
 }
 .dlg-title {
   font-size: 16px;
   font-weight: 600;
   color: var(--ant-color-text);
 }
+/* 表单区用浅底衬托，和 NewDownloadDialog 保持一致 */
 .card {
-  border: 1px solid var(--ant-color-border);
-  border-radius: 8px;
+  background: var(--ant-color-fill-panel);
+  border-radius: var(--ant-radius);
   padding: 16px;
 }
 .row {
@@ -119,7 +120,7 @@ function save(): void {
   justify-content: space-between;
 }
 .lbl {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--ant-color-text);
 }
 .mono {
