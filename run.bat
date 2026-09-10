@@ -1,49 +1,52 @@
 @echo off
-REM FastDrop launcher: installs PySide6 and builds the Rust engine on demand.
+REM FastDrop launcher: builds the Rust engine on demand, then starts the Electron app.
 setlocal
 cd /d %~dp0
 
-where python >nul 2>nul
-if errorlevel 1 (
-    echo Python not found on PATH. Install it from https://python.org and re-run.
-    pause
-    exit /b 1
-)
-
-REM --- Python side: PySide6 ---
-python -c "import PySide6" >nul 2>nul
-if errorlevel 1 (
-    echo First run: installing Python dependencies ...
-    python -m pip install --upgrade pip
-    python -m pip install -r requirements.txt
-    if errorlevel 1 (
-        echo Dependency install failed. Run manually:  python -m pip install -r requirements.txt
-        pause
-        exit /b 1
-    )
-)
-
 REM --- Rust side: the download engine runs as a separate process so heavy
-REM --- downloads don't hold the GIL and make the UI stutter. Missing binary
-REM --- is not fatal -- the app silently falls back to the built-in Python
-REM --- engine, which is just slower.
+REM --- downloads don't block the UI thread. The packaged app ships its own copy
+REM --- under resources\, so this only matters for dev runs via run.bat.
 set "ENG=engine-rs\target\release\fastdrop-engine.exe"
 if not exist "%ENG%" (
     where cargo >nul 2>nul
     if errorlevel 1 (
-        echo Rust toolchain not found -- falling back to the Python engine.
-        echo Install Rust from https://rustup.rs, then re-run to build the fast engine.
-    ) else (
-        echo Building the Rust download engine (first time only) ...
-        pushd engine-rs
-        set CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
-        cargo build --release
-        if errorlevel 1 (
-            echo Rust build failed -- falling back to the Python engine.
-        )
-        popd
+        echo Rust toolchain not found -- building the download engine requires it.
+        echo Install Rust from https://rustup.rs, then re-run.
+        pause
+        exit /b 1
     )
+    echo Building the Rust download engine (first time only) ...
+    pushd engine-rs
+    set CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+    cargo build --release
+    if errorlevel 1 (
+        echo Rust build failed.
+        pause
+        exit /b 1
+    )
+    popd
 )
 
-python fastdrop\main.py %*
-pause
+REM --- Electron side ---
+if not exist "app\node_modules" (
+    echo Installing frontend dependencies (first run) ...
+    pushd app
+    call npm install
+    if errorlevel 1 (
+        echo npm install failed.
+        pause
+        exit /b 1
+    )
+    popd
+)
+
+pushd app
+call npm run dist:dir
+if errorlevel 1 (
+    echo Package failed.
+    pause
+    exit /b 1
+)
+popd
+
+start "" "%~dp0app\release\win-unpacked\fastdrop.exe"

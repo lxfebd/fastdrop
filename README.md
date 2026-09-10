@@ -4,23 +4,18 @@
 
 只做 HTTP/HTTPS。不打包浏览器扩展、不接管系统下载，就是一个干净的任务列表。
 
-下载引擎是 **Rust** 写的，跑在独立进程里；界面是 Python + PySide6。两者用 stdio 上的换行 JSON 通信。这样重下载不会占用 GIL，UI 才不会卡。找不到 Rust 引擎时自动退回内置的 Python 实现，功能不变，只是慢一些。
+下载引擎是 **Rust** 写的，跑在独立进程里；外壳是 Electron，界面是 Vue 3 + Ant Design Vue。引擎通过 stdio 上的换行 JSON 和主进程通信，重下载在独立进程里跑，主进程事件循环不会被阻塞。
 
 ## 快速开始
 
 ```bash
-python -m pip install -r requirements.txt
+cd app && npm install
 cd engine-rs && cargo build --release && cd ..
-python fastdrop/main.py
+cd app && npm run dev      # 开发模式
+cd app && npm run dist     # 打包安装包
 ```
 
-或者直接双击 `run.bat`（Windows，首次运行会自动装依赖并构建引擎）。没有 Rust 工具链也没关系——应用会退回 Python 引擎，功能完整。
-
-命令行直接丢 URL 进去会立即开始下载：
-
-```bash
-python fastdrop/main.py https://example.com/big.iso
-```
+或者直接双击 `run.bat`（Windows，首次运行会自动构建 Rust 引擎、装前端依赖、打包并启动应用）。Rust 工具链是必需的——Rust 引擎现在是唯一的下载实现，没有 Python 兜底了。
 
 ## 功能
 
@@ -37,25 +32,18 @@ python fastdrop/main.py https://example.com/big.iso
 ## 目录结构
 
 ```
-fastdrop/            界面层（PySide6）
-  main.py            入口
-  ui_main.py         主窗口：侧栏 / 任务列表 / 详情面板
-  widgets.py         通用组件，含分段进度条
-  dialogs.py         新建下载 / 设置 / 关于
-  theme.py           Ant Design v5 设计 token、中文字体栈、图标渲染
-  tray.py            系统托盘
-  assets/            Lucide 风格 SVG 图标（33 个）
-idm/                 调度层（不依赖 Qt）
-  engine.py          DownloadTask：内置 Python 引擎，Rust 不可用时的兜底
-  engine_rs.py       RustTask：子进程桥，起引擎进程、收发 JSON 事件
-  manager.py         Manager：引擎选择、并发调度、队列、快照
-  models.py          TaskDef / Settings / Store 持久化
+app/                 Electron 外壳 + Vue 前端
+  src/main/          主进程：引擎子进程桥（engine.ts）、调度（manager.ts）、持久化（store.ts）
+  src/preload/       preload：暴露 window.fd 到渲染进程
+  src/renderer/      Vue 3 + Ant Design Vue：AppShell / TaskRow / SettingsDialog ...
+  src/shared/        主进程与渲染进程共享的类型和 IPC 频道名
+  electron-builder.yml   打包配置：把引擎打进 resources/
 engine-rs/           Rust 下载引擎（独立二进制，无界面）
   src/main.rs        分段并发下载 + sidecar 续传 + stdio JSON 协议
-tests/               引擎测试 + 桥接测试 + UI 离屏验证
+tests/               引擎测试
 ```
 
-`engine_rs` 和 `engine.py` 对外接口一致（`state`/`speed`/`snapshot`/`run`/`pause`/`resume`/`stop`），所以 Manager 和 UI 不关心用的是哪个。引擎选在 `manager.py` 里一处决定。
+`engine.ts` 起引擎子进程、收发 JSON 事件；`manager.ts` 负责并发调度、排队和重试。Rust 引擎是唯一实现，不再有多引擎回退。打包后引擎作为普通文件落在 `resources/fastdrop-engine.exe`（不能进 asar，asar 里 spawn 不了），`enginePath()` 按 `process.resourcesPath` 找它。
 
 ## 工作原理
 
@@ -106,27 +94,21 @@ tests/               引擎测试 + 桥接测试 + UI 离屏验证
 # Rust 引擎：4 个用例（分段并发 / 不支持 Range 回退 / 断点续传 / 错误上报）
 python tests/test_engine_rs.py
 
-# 桥接 + 调度：5 个用例（引擎可用 / 快照字段 / 暂停续传 / Manager 全链路 / 引擎接入）
-python tests/test_bridge.py
-
-# 内置 Python 引擎：7 个用例（基础下载 / 暂停续传 / 连续两次续传 / 冷启动续传 / 单线程兜底 / 坏 URL / 分段布局）
-python tests/test_engine.py
-
-# UI：离屏渲染验证主窗口、三个对话框、主题切换
-QT_QPA_PLATFORM=offscreen python tests/verify.py
+# 前端类型检查 + 生产构建
+cd app && npm run typecheck && npm run build
 ```
 
-前三个都自带本地 HTTP 服务器（支持 Range 和不支持 Range 两个端口），不碰外网。所有下载用例都用 **md5 全量校验**，不是只看"下载完成了"。暂停/续传用例里终端会刷一堆 `ConnectionAbortedError`——那是测试服务器侧收到客户端主动断连的正常噪音，不是失败。
+测试脚本自带本地 HTTP 服务器（支持 Range 和不支持 Range 两个端口），不碰外网。所有下载用例都用 **md5 全量校验**，不是只看"下载完成了"。暂停/续传用例里终端会刷一堆 `ConnectionAbortedError`——那是测试服务器侧收到客户端主动断连的正常噪音，不是失败。
 
-另外有 `tests/_net_verify.py` 走真实公网（Hetzner / OVH / tele2 等候选源，遇到限流会自动换源重试）：urllib 单线程先下基准算 md5，再让 Rust 引擎 8 段并发比对、杀掉进程模拟崩溃后从侧车续传比对、最后 Python 引擎下同一个文件做跨引擎互验。崩溃续传用本地限速服务器造"确定的中途中断"，而不是赌公网慢下来。
+UI 走真实验证：用 CDP（Chrome DevTools Protocol）连渲染进程读 DOM，再直接检查数据目录里落盘的 JSON。亮/暗两套配色数值、Modal、Tabs 三个页签切换、以及打包后 `resources/` 里的引擎能否被找到，都是实测过的。
 
-当前状态：**Rust 引擎 4/4、桥接 5/5、Python 引擎 7/7、UI 离屏验证、真实公网 4/4 全部通过**。
+当前状态：**Rust 引擎 4/4 通过，typecheck 与 build 全绿，打包后 8 线程 2MB 端到端下载通过，老格式 `~/.fastdrop/` 数据读写兼容**。
 
 ## 依赖
 
-- Python 3.10+
-- PySide6（Qt 6，唯一第三方依赖）
-- Rust（可选，只为更快；缺失时用内置 Python 引擎）
+- Rust（必需，构建下载引擎）
+- Node.js 18+ 与 npm（前端构建与运行）
+- Electron 44（`app/node_modules/electron`，打包时会用它而非重新下载）
 
 ## 许可
 
