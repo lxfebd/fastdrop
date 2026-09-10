@@ -1,7 +1,7 @@
 {
   "name": "fastdrop",
   "version": "0.2.0",
-  "description": "多线程分段下载管理器 — Rust 引擎 + Electron + Vue3 + antd-vue",
+  "description": "游戏下载盒子 — 内嵌游戏站浏览器 + Rust 多线程分段下载引擎",
   "main": "./out/main/index.js",
   "author": "FastDrop",
   "license": "MIT",

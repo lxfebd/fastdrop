@@ -1,9 +1,9 @@
 <script setup lang="ts">
 /**
- * 新建下载对话框。对应 fastdrop/dialogs.py 的 NewDownloadDialog：
+ * 新建下载对话框：
  * URL + 保存位置 + 分片数 + 备注。
  *
- * 提交前的 URL 规范化（补 https:// 前缀）和老版一致，让用户贴裸域名也能用。
+ * 提交前的 URL 规范化（补 https:// 前缀）让用户贴裸域名也能用。
  */
 import { computed, reactive } from 'vue'
 import { DownOutlined, FolderOpenOutlined } from '@ant-design/icons-vue'

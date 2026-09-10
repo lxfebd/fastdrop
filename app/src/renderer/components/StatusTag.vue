@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 任务状态徽标。对应 fastdrop/widgets.py 的 Badge，用 ant Tag 的 preset 色
+ * 任务状态徽标。用 ant Tag 的 preset 色
  * 而不是硬编码十六进制，这样深/浅色切换由 ConfigProvider 统一负责。
  */
 import { Tag } from 'ant-design-vue'

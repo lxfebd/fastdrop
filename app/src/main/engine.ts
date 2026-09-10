@@ -1,7 +1,7 @@
 /**
  * Rust 下载引擎封装。
  *
- * 移植自 Python 层 idm/engine_rs.py，协议完全不变：
+ * 通信协议是换行 JSON，稳定不变：
  *   - 每个任务一个独立 Rust 子进程（tokio + reqquest）
  *   - stdin 写一行 JSON 命令，stdout 读一行 JSON 事件
  *   - 先 probe（算分段 + 读断点）再 run；之后 pause/resume/stop/set_threads
@@ -341,7 +341,7 @@ function logPath(): string {
   return join(dir, '.engine-stderr.log')
 }
 
-/** 数据目录，与老 Python 层保持一致，保证任务/设置/断点文件通用。 */
+/** 数据目录，固定为 ~/.fastdrop，保证任务/设置/断点文件跨版本通用。 */
 export function dataDir(): string {
   if (process.env.FASTDROP_DATA_DIR) return process.env.FASTDROP_DATA_DIR
   return join(homedir(), '.fastdrop')

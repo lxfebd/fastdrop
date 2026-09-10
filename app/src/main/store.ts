@@ -1,7 +1,7 @@
 /**
- * 任务与设置的读写。移植自 idm/models.py 的 Store。
+ * 任务与设置的读写。
  *
- * 序列化格式刻意保持和 Python 版本逐字节兼容（indent=2、不转义中文、
+ * 序列化格式刻意固定（indent=2、不转义中文、
  * 原子替换），因为新旧版本共用 ~/.fastdrop 数据目录，用户不想迁移数据。
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
@@ -26,8 +26,7 @@ function settingsFile(): string {
 
 /**
  * 默认保存目录：优先 ~/Downloads，不存在时退回数据目录。
- * 对应 Python 的 default_download_dir()——两边必须一致，否则老设置文件
- * 迁移过来后保存路径会漂移。
+ * 这个默认值要稳定——改它会让老任务迁移过来后保存路径漂移。
  */
 export function defaultDownloadDir(): string {
   const d = join(homedir(), 'Downloads')
@@ -97,7 +96,7 @@ export class Store {
     if (typeof d.max_concurrent === 'number') s.max_concurrent = d.max_concurrent
     if (typeof d.confirm_delete === 'boolean') s.confirm_delete = d.confirm_delete
     if (typeof d.dark === 'boolean') s.dark = d.dark
-    // 和 Python Settings.__post_init__ 一样：空目录补默认值，避免 dest 落成空串
+    // 空目录补默认值，避免 dest 落成空串
     if (!s.download_dir) s.download_dir = defaultDownloadDir()
     return s
   }
@@ -107,14 +106,14 @@ export class Store {
   }
 }
 
-/** 与 Python uuid.uuid4().hex[:12] 等价：12 位十六进制。 */
+/** 12 位十六进制随机 ID。 */
 function newId(): string {
   return randomBytes(6).toString('hex')
 }
 
 /**
  * dest 指向目录时用 URL 文件名补全成完整文件路径。
- * 和 Python 版 _resolve_dest 行为一致，保证两边算出的保存路径相同。
+ * 目录判断与引擎侧约定一致，保证两端算出的保存路径相同。
  */
 export function resolveDest(url: string, dest: string): string {
   if (!dest) return dest

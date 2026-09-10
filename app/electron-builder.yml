@@ -14,7 +14,8 @@ directories:
   output: release
   buildResources: build
 
-# 直接用已装好的 Electron，别去 GitHub 下载——这台机器连不上 github.com/releases。
+# 复用 node_modules 里随 electron 依赖装好的发行版，构建时不再联网取
+# electron release（缓存更稳，也不需要配置下载代理）。
 electronDist: node_modules/electron/dist
 
 files:

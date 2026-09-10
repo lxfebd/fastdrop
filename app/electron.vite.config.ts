@@ -1,6 +1,12 @@
 import { fileURLToPath, URL } from 'node:url'
+import { readFileSync } from 'node:fs'
 import { defineConfig } from 'electron-vite'
 import vue from '@vitejs/plugin-vue'
+
+// 版本号只有一个真值：package.json。构建期读出来注入，渲染层直接用，
+// 不会漂移成「package.json 是 0.2.0、界面显示 2.0.0」这种硬编码。
+// JSON.stringify 把值包成合法 JS 字符串字面量，define 做纯文本替换。
+const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
 
 /**
  * 三方构建配置。electron-vite 把主进程 / preload / 渲染进程分开编译：
@@ -29,6 +35,10 @@ export default defineConfig({
   renderer: {
     // base 不要自己设：electron-vite 在 production 下强制 './'，写了会告警。
     // 渲染入口是 src/renderer/index.html，vite 会自己发现，无需显式 input。
+    define: {
+      // 声明在 src/renderer/version.d.ts；只给渲染层，主进程用不到版本号。
+      __APP_VERSION__: JSON.stringify(pkg.version),
+    },
     plugins: [vue()],
     resolve: {
       alias: {

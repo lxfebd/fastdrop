@@ -1,11 +1,11 @@
 <script setup lang="ts">
 /**
  * 根组件。ant-design-vue 的 ConfigProvider + theme 算法负责整套配色，
- * 不再像 PySide6 版那样把 token 手工翻译成 QSS 字符串。
+ * 不需要把设计 token 手工翻译成样式字符串。
  *
  * 一份调色板同时喂两个消费方：ConfigProvider 拿到 seed token 生成组件样式，
  * applyPaletteCss 把同一批颜色写成 :root 变量供布局自己的 CSS 使用。
- * 只给一个消费方的话，另一侧的颜色就会漂（和手抄 QSS 漏项是同一种死法）。
+ * 只给一个消费方的话，另一侧的颜色就会漂。
  */
 import { computed, onMounted, watch } from 'vue'
 import { ConfigProvider } from 'ant-design-vue'

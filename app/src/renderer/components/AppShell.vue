@@ -1,11 +1,11 @@
 <script setup lang="ts">
 /**
- * 主界面骨架。对应 fastdrop/ui_main.py 的 MainWindow：
+ * 主界面骨架：
  *   侧栏 | 工具栏 + 任务表 / 详情卡 | 状态栏
  *
- * 这里只做布局和动作分发，展示逻辑都在子组件里。Python 版用 QSplitter 分隔
- * 列表和详情，Web 没有内建的拖拽分栏，用固定宽度 + 卡片边界替代——拖拽调整
- * 不是下载工具的核心功能，不值得为了它引一个依赖。
+ * 这里只做布局和动作分发，展示逻辑都在子组件里。Web 没有内建的拖拽分栏，
+ * 列表和详情之间用固定宽度 + 卡片边界替代——拖拽调整不是下载工具的核心功能，
+ * 不值得为了它引一个依赖。
  *
  * 视觉层级（改样式前先读 theme.ts 的层级约定）：灰画布 → 白面板 → 行内表面。
  * 三个大区域（工具栏、任务表、详情）是独立白卡浮在灰底上，靠边界产生层级，
@@ -36,6 +36,10 @@ import { useAppStore } from '../store'
 
 const store = useAppStore()
 const { state } = store
+
+// 版本号由构建期注入（见 electron.vite.config.ts 的 define），模板里读这个
+// 本地绑定——直接在模板写 __APP_VERSION__ 会被编译成 _ctx.__APP_VERSION__，拿不到值。
+const version = __APP_VERSION__
 
 // --------------------------------------------------------------- 派生数据
 
@@ -380,7 +384,7 @@ onBeforeUnmount(() => {
           <span class="about-logo"><DownOutlined /></span>
           <div>
             <div class="about-name">FastDrop</div>
-            <div class="about-ver">v2.0.0 · 多线程下载管理器</div>
+            <div class="about-ver">v{{ version }} · 游戏下载盒子</div>
           </div>
         </div>
         <div class="about-desc">

@@ -10,8 +10,8 @@
 //!           {"event":"done","total":N}
 //!           {"event":"error","error":"..."}
 //!
-//! Segment offsets and the `.part.meta` sidecar are byte-for-byte the same as the
-//! old Python engine, so resume data written by it still works.
+//! Segment offsets and the `.part.meta` sidecar keep the same format across engine
+//! versions, so resume data written by an older version still works.
 
 use std::io::{SeekFrom, Write};
 use std::path::Path;

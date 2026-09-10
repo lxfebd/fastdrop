@@ -4,7 +4,7 @@
  * tick 圈死在这个节点里——放在 AppShell 顶层组件里的话，每秒那一次
  * ref 变更会带动整个 AppShell 重新求值模板，纯浪费。
  *
- * 老版 Python 用 time.strftime，这里对齐成 `YYYY-MM-DD  HH:MM:SS` 同一格式。
+ * 格式固定为 `YYYY-MM-DD  HH:MM:SS`（秒位前两个空格，便于肉眼对齐）。
  */
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 

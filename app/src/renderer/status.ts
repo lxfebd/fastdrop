@@ -1,5 +1,5 @@
 /**
- * 任务状态 → 展示元数据。对应 fastdrop/widgets.py 的 STATUS 表，
+ * 任务状态 → 展示元数据。
  * 文案和 ant Tag 的 preset 颜色都在这定义，模板里不要再散落判断。
  */
 import type { TaskState } from '../shared/types'
@@ -28,7 +28,7 @@ export function statusMeta(state: string): StatusMeta {
 }
 
 /**
- * 侧栏过滤与行是否显示的匹配规则。对应 Python 的 _match：
+ * 侧栏过滤与行是否显示的匹配规则：
  * 「下载中」桶同时收 preparing，因为 preparing 视觉上就是一段等待中。
  */
 export function matchesFilter(state: string | undefined, filter: string): boolean {

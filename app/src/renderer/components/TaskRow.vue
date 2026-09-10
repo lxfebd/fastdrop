@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 单行任务。对应 fastdrop/ui_main.py 的 TaskRow：
+ * 单行任务：
  * 图标 + 名称/副标题（两行堆叠，定宽）+ 大小 + 进度条 + 百分比 + 速度 + 状态 + 操作。
  *
  * 列宽和 AppShell 的表头 .c-* 一一对应，两处一起改。用固定 px 而不是百分比，

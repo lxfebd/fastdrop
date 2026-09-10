@@ -1,12 +1,12 @@
 /**
- * 任务调度器。移植自 idm/manager.py。
+ * 任务调度器。
  *
  * 引擎只负责单个任务，这里负责全局调度：
  *   - 并发上限（同时最多几个任务在跑）
  *   - 排队 / 出队 / 重试
  *   - 把引擎回调转成推送到渲染进程
  *
- * Node 是单线程的，所以 Python 里的 threading.RLock 在这里不需要了——
+ * Node 是单线程的，不需要显式互斥锁——
  * 主进程的事件循环就是唯一的执行上下文，不存在并发写。
  */
 import { basename, join } from 'node:path'
@@ -95,7 +95,7 @@ export class Manager {
     if (!dest) return dest
     // 判断「是不是目录」不能只看结尾分隔符：默认保存目录是 ~/Downloads，
     // 没有尾部斜杠。把它当文件路径会让引擎下完 100% 后 rename 到已存在目录上失败。
-    // 与 Python 版的 Path(dest).is_dir() 判断保持一致。
+    // 这个判断必须和引擎侧的 resolveDest 一致，否则两端算出的保存路径不同。
     const isDir = dest.endsWith('/') || dest.endsWith('\\') || isDirectory(dest)
     if (!isDir) return dest
     const name = basename(new URL(url).pathname) || 'download'

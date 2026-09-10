@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 偏好设置。对应 fastdrop/dialogs.py 的 SettingsDialog：下载 / 网络 / 外观三个页签。
+ * 偏好设置：下载 / 网络 / 外观三个页签。
  *
  * AntDV 的 Tabs 没有 React 版的 items 配置，页签必须写成 <TabPane> 子组件；
  * 页签标题用 tab 属性（不是 label），内容放默认插槽。

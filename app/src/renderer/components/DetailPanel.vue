@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 右侧详情面板。对应 fastdrop/ui_main.py 的 DetailCard + DetailPanel：
+ * 右侧详情面板：
  * 标题 → 状态徽标 → 分段卡 → 6 格统计 → URL → 保存路径。
  *
  * 空态（没有任务 / 没选中）给引导而不是白屏，和老版一致。
@@ -44,7 +44,7 @@ const name = computed(() => {
 const state = computed(() => props.snap?.state ?? 'queued')
 const pct = computed(() => Math.max(0, Math.min(100, (props.snap?.progress ?? 0) * 100)))
 
-/** 6 格统计。顺序和 Python 版一致：已下载/总计/速度/剩余时间/分段/线程。 */
+/** 6 格统计。顺序固定为：已下载/总计/速度/剩余时间/分段/线程。 */
 const stats = computed(() => {
   const s = props.snap
   return [

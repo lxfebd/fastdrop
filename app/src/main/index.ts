@@ -34,7 +34,7 @@ function createWindow(): void {
     height: 780,
     minWidth: 1080,
     minHeight: 620,
-    title: 'FastDrop · 多线程下载管理器',
+    title: 'FastDrop · 游戏下载盒子',
     autoHideMenuBar: true,
     backgroundColor: store.loadSettings().dark ? '#141414' : '#f5f5f5',
     show: false,
@@ -69,7 +69,7 @@ function createWindow(): void {
 function createTray(): void {
   const icon = nativeImage.createEmpty()
   tray = new Tray(icon)
-  tray.setToolTip('FastDrop · 多线程下载管理器')
+  tray.setToolTip('FastDrop · 游戏下载盒子')
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: '显示窗口', click: () => win?.show() },

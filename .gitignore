@@ -9,17 +9,13 @@ __pycache__/
 .pytest_cache/
 engine-rs/target/
 
-# 本地临时数据
-app/.test-data/
-app/.probe-*
-app/.pk-*
-app/.compat-*
+# 本地数据与运行产物
 /tmp/fd-test/
 
 # 引擎回归测试的临时下载目录（tests/test_engine_rs.py 每次跑都会重建）
 tests/_tmp_rs/
 
-# ZCode 本地状态与一次性调试输出
+# AI 助手本地状态与一次性调试输出
 .zcode/
 *_out.txt
 *.status

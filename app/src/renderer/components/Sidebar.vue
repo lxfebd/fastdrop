@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 左侧软上下文框架：品牌、新建按钮、按状态过滤的导航、底部设置/关于。
- * 对应 fastdrop/ui_main.py 的 Sidebar，宽度同样固定 228。
+ * 宽度固定 228。
  */
 import { computed, type Component } from 'vue'
 import {

@@ -7,8 +7,7 @@ import { theme } from 'ant-design-vue'
  * 为什么需要它 —— AntDV 和 React 版 antd 有个关键差别：React 版开 cssVar 会往
  * :root 注入 --ant-color-* 变量，AntDV 不会（它的 ThemeConfig 里根本没有 cssVar
  * 这个属性，写了静默忽略）。而我们的布局层（侧栏、工具栏、状态栏）大量用
- * var(--ant-*) 写样式，变量不存在的话整块就是透明背景，跟 PySide6 那次手抄 QSS
- * 漏项是同一个死法。
+ * var(--ant-*) 写样式，变量不存在的话整块就是透明背景。
  *
  * 所以这里把颜色显式列出来，同时喂两个消费者：
  *   1. ConfigProvider 的 token —— 决定 antd 组件本体长什么样
