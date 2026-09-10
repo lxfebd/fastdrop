@@ -1,0 +1,42 @@
+# electron-builder 配置。
+#
+# 关键点是 extraResources：Rust 引擎是独立子进程，不在 node_modules 里，
+# 打进 asar 里也 spawn 不了（asar 需要解包路径）。必须作为普通文件落到
+# resources/，engine.ts 的 enginePath() 就是按 process.resourcesPath 找的。
+# 漏配这一项，打包后的应用启动正常、一点下载才报「Rust 引擎未找到」。
+
+appId: com.fastdrop.app
+productName: FastDrop
+executableName: fastdrop
+
+directories:
+  # 产物落到 release/（已在 .gitignore）
+  output: release
+  buildResources: build
+
+# 直接用已装好的 Electron，别去 GitHub 下载——这台机器连不上 github.com/releases。
+electronDist: node_modules/electron/dist
+
+files:
+  # 只打打包产物本身，不要连 src/、测试、探针一起塞进安装包
+  - out/**/*
+  - package.json
+  - node_modules/**/*
+
+extraResources:
+  - from: ../engine-rs/target/release/fastdrop-engine.exe
+    to: fastdrop-engine.exe
+    filter:
+      - "**/*"
+
+win:
+  # 不带图标资源，用 Electron 默认图标；后面补 build/icon.ico 会自动被识别
+  artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+  target:
+    - nsis
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true

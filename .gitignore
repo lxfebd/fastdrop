@@ -1,0 +1,17 @@
+# 构建产物
+app/out/
+app/release/
+app/node_modules/
+app/.pnpm-store/
+*.log
+*.pyc
+__pycache__/
+.pytest_cache/
+engine-rs/target/
+
+# 本地临时数据
+app/.test-data/
+app/.probe-*
+app/.pk-*
+app/.compat-*
+/tmp/fd-test/

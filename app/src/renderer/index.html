@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:"
+    />
+    <title>FastDrop · 多线程下载管理器</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <!-- electron-vite 把 src/renderer 当渲染 root，入口必须落在它下面；
+         写在项目根会被当成相对产物名，rollup 直接报 ../../index.html -->
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
