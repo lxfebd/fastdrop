@@ -17,5 +17,6 @@ tests/_tmp_rs/
 
 # AI 助手本地状态与一次性调试输出
 .zcode/
+.mellos/
 *_out.txt
 *.status

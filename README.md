@@ -40,6 +40,152 @@ Windows 上也可以直接双击根目录的 `run.bat`：首次运行会自动�
 
 前置依赖：**Rust 工具链**（构建下载引擎，必需）、**Node.js 18+ 与 npm**（前端构建与运行）。Electron 由 npm 依赖安装，打包时复用 `node_modules` 里那份发行版，不再联网去取 electron release。
 
+## 架构
+
+三层外壳 + 一台独立引擎。渲染进程和主进程之间只走 IPC，主进程和引擎之间只走 stdio——
+两条边界都不共享内存，所以任一侧崩了都不会把另一侧带下去。
+
+```mermaid
+flowchart TD
+    classDef ui    fill:#eaf2ff,stroke:#3b82f6,color:#0f172a
+    classDef srv   fill:#eef2ff,stroke:#6366f1,color:#0f172a
+    classDef db    fill:#fef3c7,stroke:#d97706,color:#0f172a
+    classDef ext   fill:#dcfce7,stroke:#16a34a,color:#0f172a
+    classDef base  fill:#f1f5f9,stroke:#64748b,color:#0f172a
+
+    subgraph SHELL["外壳入口"]
+        MAIN_ENTRY["主进程入口 main/index"]:::srv
+        APP_SHELL["AppShell 主界面骨架"]:::ui
+    end
+
+    subgraph COMP["编排与界面组件"]
+        CAPTURE["捕获桥 sites/bridge"]:::srv
+        PRELOAD["preload"]:::srv
+        RSTORE["renderer store"]:::srv
+        APPROOT["App 根组件"]:::ui
+        TASKROW["TaskRow"]:::ui
+        DETAIL["DetailPanel"]:::ui
+        SIDEBAR["Sidebar"]:::ui
+        GAMESITES["GameSites 内嵌浏览器"]:::ui
+        SEGMENT["SegmentBar"]:::ui
+        CLOCK["ClockLabel"]:::ui
+        DIALOGS["Dialogs"]:::ui
+    end
+
+    subgraph CORE["核心服务"]
+        MANAGER["manager 调度器"]:::srv
+        REGISTRY["registry 站点注册表"]:::srv
+        RESOLVER["resolver 直链解析"]:::srv
+        STAG["StatusTag"]:::ui
+    end
+
+    subgraph INFRA["基础能力"]
+        STORE["store 持久化"]:::db
+        EBRIDGE["engine 桥"]:::srv
+        IPC["ipc 频道契约"]:::base
+        STATUS["status 状态元数据"]:::ui
+        THEME["theme 配色"]:::ui
+        ADAPTERS["站点适配器"]:::srv
+    end
+
+    subgraph BASE["基座：类型与工具"]
+        TYPES["types"]:::base
+        SITE_T["sites 类型"]:::base
+        FMT["format 格式化"]:::base
+        SHTTP["http 客户端"]:::base
+        ENGINE["engine-rs · Rust 独立进程"]:::ext
+    end
+
+    MAIN_ENTRY -->|持有调度器| MANAGER
+    MAIN_ENTRY -->|接线| CAPTURE
+    MAIN_ENTRY --> STORE
+    MAIN_ENTRY -->|注册频道| IPC
+
+    APP_SHELL --> TASKROW
+    APP_SHELL --> DETAIL
+    APP_SHELL --> SIDEBAR
+    APP_SHELL --> GAMESITES
+    APP_SHELL --> DIALOGS
+    APP_SHELL -->|过滤规则| STATUS
+    APP_SHELL --> RSTORE
+    APP_SHELL --> FMT
+    APP_SHELL --> TYPES
+    APP_SHELL --> CLOCK
+
+    TASKROW --> STAG
+    TASKROW --> FMT
+    TASKROW --> TYPES
+    DETAIL --> STAG
+    DETAIL --> FMT
+    DETAIL --> SEGMENT
+    DETAIL --> TYPES
+    SIDEBAR --> STATUS
+    SIDEBAR --> TYPES
+    STAG --> STATUS
+    STAG --> TYPES
+    APPROOT --> APP_SHELL
+    APPROOT --> RSTORE
+    APPROOT --> THEME
+    RSTORE -->|调用| IPC
+    RSTORE --> TYPES
+    GAMESITES -->|搜索/镜像| IPC
+    GAMESITES --> SITE_T
+    DIALOGS --> TYPES
+
+    CAPTURE --> REGISTRY
+    CAPTURE --> RESOLVER
+    CAPTURE --> STORE
+    CAPTURE --> IPC
+    CAPTURE --> SITE_T
+    PRELOAD -->|暴露 window.fd| IPC
+
+    MANAGER -->|命令与事件| EBRIDGE
+    REGISTRY -->|注册解析器| ADAPTERS
+    RESOLVER --> SHTTP
+    ADAPTERS --> SHTTP
+
+    EBRIDGE -->|stdio 换行 JSON| ENGINE
+    STORE --> TYPES
+    IPC --> TYPES
+    IPC --> SITE_T
+    MANAGER --> TYPES
+    EBRIDGE --> TYPES
+    REGISTRY --> SITE_T
+    RESOLVER --> SITE_T
+    ADAPTERS --> SITE_T
+    STATUS --> TYPES
+```
+
+这张图不是按理想分层画的，是从 `git ls-files` 里 35 个源文件的真实 import 提取得来的
+（62 条内部 import，图上 53 条），差的部分都写在这里：
+
+- **图上 53 条节点边**：两个对话框合成一个 `Dialogs` 节点、三个站点适配器合成一个节点，
+  按文件展开是 60 个文件对，正好等于被画上的全部真实 import；加一条 `engine 桥 →
+  engine-rs` 的跨进程边，共 53 条。
+- **跨进程边单独算**：`engine 桥 → engine-rs` 是 `spawn` 子进程 + stdio 换行 JSON，
+  不是 import，但它是全系统最重要的一条边界，必须画。
+- **有意省略 2 条**：`renderer/main.ts → App.vue` 是 `createApp` 的入口引导，不是组件
+  依赖；`GameSites.vue → webview.d.ts` 只是 `<webview>` 标签的类型声明，没有运行时关系。
+
+所以要区分两件事：
+
+- **真的不变量是进程边界，不是层号。** 渲染层永远不直接碰 Node 和文件系统，一律经
+  `preload` 的 `window.fd` 走 IPC；主进程永远不自己发网络请求，要么交给 Rust 引擎，
+  要么交给 `sites/` 的适配器；引擎是独立进程，只吃 stdio 上的 JSON。
+- **同层之间存在依赖，而且这是允许的。** `manager` 用 `engine 桥`、`registry` 用
+  站点适配器、`DetailPanel` 用 `SegmentBar` 和 `StatusTag`，都是实打实的 import。
+  图按职责分组画，分组只是视觉约定，不构成依赖方向约束。
+
+两类边界值得单独说：
+
+- **主进程 ↔ 引擎**：`engine.ts` 每个任务起一个独立 Rust 子进程，stdin 写一行 JSON 命令，
+  stdout 读一行 JSON 事件。引擎拿不到主进程的任何内存，所以引擎 OOM 或 panic 不会拖垮 UI；
+  反过来 UI 关掉时主进程能干净地逐个停掉子进程。
+- **webview ↔ 下载队列**：`GameSites` 里的 `<webview>` 跑在独立会话 `persist:gamesites`，
+  登录一次长期有效。捕获桥在 `will-download` 里 `item.cancel()` 拦掉 Electron 默认的另存为，
+  把真实文件 URL 推给渲染层弹「添加到 FastDrop」——网盘链接是页面跳转、不触发下载事件，
+  所以这类链接用户照常手动处理，不会被误拦。
+
 ## 游戏站集成
 
 侧栏「游戏站」页签是一个内嵌浏览器，缝入 gamer520、nekogal、playzip 三个站点。用法：搜索框输关键词（三站并行搜），点结果弹出镜像列表，选一条就转成真实直链并进下载列表。
