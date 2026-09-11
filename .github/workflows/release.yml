@@ -1,0 +1,66 @@
+name: Release
+
+# 打 v* tag 时发布：在 Windows runner 上构建 Rust 引擎 + 打包 nsis 安装包，
+# 连同引擎二进制一起上传到 GitHub Release。本地验证过的产物路径是
+# app/release/ 下的 .exe（electron-builder 的 win:nsis 目标）。
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-registry-release-${{ runner.os }}-${{ hashFiles('engine-rs/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: engine-rs/target
+          key: cargo-build-release-${{ runner.os }}-${{ hashFiles('engine-rs/Cargo.lock') }}
+
+      - name: Build engine (release)
+        working-directory: engine-rs
+        run: cargo build --release
+
+      - name: Install app dependencies
+        working-directory: app
+        run: npm ci
+
+      # electron-builder.yml 的 extraResources 会把引擎打成普通文件放进
+      # resources/（asar 里 spawn 不了子进程，必须落盘），这一步就是产出
+      # 官方 Windows 安装包的唯一入口。
+      - name: Build + package installer
+        working-directory: app
+        run: npm run dist
+
+      - name: Upload Release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            app/release/*.exe
+            engine-rs/target/release/fastdrop-engine.exe
+          generate_release_notes: true
