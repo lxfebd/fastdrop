@@ -22,6 +22,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          # 不缓存 node_modules：electron 的二进制下载（postinstall）在 CI 上
+          # 经常被跳过或下载失败，缓存会把「没有 dist/electron.exe」的坏状态
+          # 一起缓存进去。让每次 run 重新 npm ci 并下载 electron 最稳。
           cache: npm
           cache-dependency-path: app/package-lock.json
 
@@ -49,6 +52,13 @@ jobs:
       - name: Install app dependencies
         working-directory: app
         run: npm ci
+
+      # 显式下载 electron 二进制：npm ci 的 postinstall 在 CI 上偶尔被跳过，
+      # 没有 dist/electron.exe，electron-builder 打包时会报
+      # ENOENT rename electron.exe -> fastdrop.exe。install.js 幂等，重复跑无害。
+      - name: Ensure electron binary
+        working-directory: app
+        run: node node_modules/electron/install.js
 
       # electron-builder.yml 的 extraResources 会把引擎打成普通文件放进
       # resources/（asar 里 spawn 不了子进程，必须落盘），这一步就是产出
