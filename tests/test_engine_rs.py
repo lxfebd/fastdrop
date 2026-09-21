@@ -24,6 +24,12 @@ import threading
 import time
 from pathlib import Path
 
+# Windows runner（英文区域）默认 stdout 是 cp1252，中文用例名 print 即崩；
+# Linux/macOS 是 utf-8 不受影响。强制输出走 utf-8，与仓库内其他测试保持一致。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parents[1]
 EXE = ROOT / "engine-rs" / "target" / "release" / ("fastdrop-engine.exe" if sys.platform == "win32" else "fastdrop-engine")
 TMP = ROOT / "tests" / "_tmp_rs"

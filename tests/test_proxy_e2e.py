@@ -48,6 +48,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# Windows runner（英文区域）默认 stdout 是 cp1252，中文输出 print 即崩；
+# 强制 utf-8，与 test_engine_rs 保持一致。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_engine_rs import Session, md5  # noqa: E402  复用同一套引擎驱动
 
