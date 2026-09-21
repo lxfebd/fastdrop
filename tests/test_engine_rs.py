@@ -789,10 +789,15 @@ def test_rate_limit_caps_throughput():
                 f"{RATE_KBPS} KiB/s 限住 {len(RATE_BODY)} 字节需要 {RATE_FLOOR:.1f}s，"
                 "1 秒就完说明限速是空操作")
         mid = se.last_progress()
-        ceiling = RATE_KBPS * 1024 * 2  # 留 2 倍余量给 EMA 平滑与令牌桶突发
-        assert 0 < mid.get("speed", 0) <= ceiling, (
-            f"快照速度 {mid.get('speed')} B/s 不在 {RATE_KBPS} KiB/s 附近，限速没作用到写盘节拍")
-        # 引擎自报的速度要拿自报的字节数复核一遍：1 秒顶多约 1.5 个限速周期的量。
+        # 速度断言用「已下载字节 / 墙钟」的平均吞吐而不是引擎自报的瞬时 speed：
+        # speed 是 EMA，令牌桶按流逝时间补配额，调度被打断（CI 共享 runner）会让某
+        # 个 tick 的 elapsed 变长，把补出的配额误算成瞬时吞吐，瞬间值虚高到几 MB/s。
+        # 平均吞吐没有这个窗口，仍能抓出「限速没作用到写盘」——真没限速 1 秒就下完。
+        elapsed_wall = time.time() - t0
+        avg_bps = (mid.get("downloaded", 0) or 0) / max(elapsed_wall, 0.001)
+        assert 0 < avg_bps <= RATE_KBPS * 1024 * 2, (
+            f"1 秒内平均吞吐 {avg_bps:.0f} B/s 不在 {RATE_KBPS} KiB/s 附近，限速没作用到写盘节拍")
+        # 引擎自报的字节数复核一遍：1 秒顶多约 1.5 个限速周期的量。
         assert mid.get("downloaded", 0) <= 1.5 * RATE_KBPS * 1024, (
             f"1 秒内已写 {mid.get('downloaded')} 字节，超过 {RATE_KBPS} KiB/s 的配额")
         # 至少有一条中间快照里 ≥2 段同时有进度：分段确实是并发跑的，共用同一个桶。
