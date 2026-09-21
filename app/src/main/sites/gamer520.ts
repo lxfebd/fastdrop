@@ -13,7 +13,16 @@
  * 解析器会尝试 API 转直链（premium 限制时回退为页面链接）。
  */
 import type { Mirror, SiteMirrorOutcome, SiteSearchOutcome, SiteSearchResult } from '../../shared/sites'
-import { extractTitle, httpFetch, postForm, withRetry } from './http'
+import {
+  EMPTY_STATE_MARKER,
+  extractTitle,
+  fetchText,
+  httpFailureMessage,
+  networkLayerHint,
+  postForm,
+  sameSiteUrl,
+  withRetry,
+} from './http'
 
 const HOME = 'https://www.gamer520.com'
 const AJAX = `${HOME}/wp-admin/admin-ajax.php`
@@ -26,29 +35,63 @@ export const SITE_ID = 'gamer520'
 export async function search(keyword: string): Promise<SiteSearchOutcome> {
   const q = encodeURIComponent(keyword.trim())
   try {
-    const html = await withRetry(() => httpFetch(`${HOME}/?s=${q}`).then((r) => r.text()))
-    const results = parseSearchResults(html)
+    const r = await withRetry(() => fetchText(`${HOME}/?s=${q}`))
+    const http = httpFailureMessage(r)
+    if (http) return { ok: false, siteId: SITE_ID, message: http }
+    const region = resultsRegion(r.text)
+    if (region === null) {
+      if (EMPTY_STATE_MARKER.test(r.text)) {
+        return { ok: true, siteId: SITE_ID, results: [], message: '没有搜到相关内容，换个关键词试试。' }
+      }
+      return {
+        ok: false,
+        siteId: SITE_ID,
+        message: `搜索页（HTTP ${r.status}，${r.text.length} 字节）里找不到结果容器 posts-wrapper，gamer520 列表结构可能已改版。`,
+      }
+    }
+    const results = parseSearchResults(region)
     if (!results.length) {
-      return { ok: true, siteId: SITE_ID, results: [], message: '没有搜到相关内容，换个关键词试试。' }
+      return {
+        ok: false,
+        siteId: SITE_ID,
+        message: '结果容器里一条文章链接都没解析出来，gamer520 卡片结构可能已改版。',
+      }
     }
     return { ok: true, siteId: SITE_ID, results }
   } catch (e) {
-    return { ok: false, siteId: SITE_ID, message: `搜索失败：${(e as Error).message}` }
+    return { ok: false, siteId: SITE_ID, message: `搜索失败：${networkLayerHint(e)}` }
   }
 }
 
-/** 文章链接形如 /NNNNN.html，标题在同个 <a> 里。 */
-function parseSearchResults(html: string): SiteSearchResult[] {
+/**
+ * 只在列表容器里找。整页扫会把导航菜单里的固定文章链接也当结果——实测每条搜索
+ * 都混进 61541.html/48671.html 两条与关键词无关的 Switch 菜单项。
+ * 返回 null 表示容器不存在：可能是站点自己的「暂无内容」页，也可能是改版了。
+ */
+function resultsRegion(html: string): string | null {
+  const i = html.search(/class="[^"]*posts-wrapper/)
+  return i < 0 ? null : html.slice(i)
+}
+
+/**
+ * 文章链接形如 /NNNNN.html，标题在同个 <a> 里。每个结果先是缩略图 <a>（里面只有
+ * <img>，stripTags 后为空）后是带标题的 <a>，所以必须「标题非空才登记 seen」，
+ * 否则缩略图那次会占掉 URL、带标题那次被当重复跳过，结果全丢。
+ *
+ * href 绝对/相对都吃（见 sameSiteUrl）：只认绝对写法时，站点改用相对路径
+ * 会让这里解析出 0 条，而 0 条被报成「站点改版」——那是我们的假设错了。
+ */
+export function parseSearchResults(html: string): SiteSearchResult[] {
   const out: SiteSearchResult[] = []
-  const re = /<a[^>]+href="(https:\/\/www\.gamer520\.com\/\d+\.html)"[^>]*>([\s\S]*?)<\/a>/g
+  const re = /<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g
   const seen = new Set<string>()
   let m: RegExpExecArray | null
   while ((m = re.exec(html))) {
-    const url = m[1]
-    if (seen.has(url)) continue
-    seen.add(url)
+    const url = sameSiteUrl(m[1], HOME, /^\/\d+\.html$/)
+    if (!url || seen.has(url)) continue
     const title = stripTags(m[2]).trim()
     if (!title) continue
+    seen.add(url)
     out.push({ siteId: SITE_ID, title, url })
   }
   return out
@@ -59,7 +102,10 @@ function parseSearchResults(html: string): SiteSearchResult[] {
 export async function mirrors(detailUrl: string): Promise<SiteMirrorOutcome> {
   try {
     // 1) 详情页拿 data-id
-    const html = await withRetry(() => httpFetch(detailUrl).then((r) => r.text()))
+    const r = await withRetry(() => fetchText(detailUrl))
+    const http = httpFailureMessage(r)
+    if (http) return { ok: false, siteId: SITE_ID, message: http }
+    const html = r.text
     const idMatch = /data-id="(\d+)"/.exec(html) ?? /post_id["']?\s*[:=]\s*["']?(\d+)/.exec(html)
     if (!idMatch) {
       return { ok: false, siteId: SITE_ID, message: '详情页里没找到下载入口（.go-down[data-id]）。' }
@@ -100,27 +146,27 @@ export async function mirrors(detailUrl: string): Promise<SiteMirrorOutcome> {
     }
     return { ok: true, siteId: SITE_ID, title, mirrors }
   } catch (e) {
-    return { ok: false, siteId: SITE_ID, message: `解析失败：${(e as Error).message}` }
+    return { ok: false, siteId: SITE_ID, message: `解析失败：${networkLayerHint(e)}` }
   }
 }
 
 /**
  * 跟随 go 地址。go 页可能 302，也可能只是包一层 JS 跳转：
  * <script>window.location='https://...'</script>，两跳都要处理。
- * 空响应（gamer520 的反爬占位）时不再死循环，直接返回让调用方决定回退方式。
+ * 空响应或非 2xx（gamer520 的反爬占位）时不再死循环，直接返回让调用方决定回退方式。
  */
 async function followGo(goUrl: string): Promise<{ html: string; finalUrl: string }> {
   let url = goUrl
   for (let i = 0; i < 4; i++) {
-    const res = await httpFetch(url)
-    const html = (await res.text()).trim()
-    if (!html) return { html: '', finalUrl: url }
+    const r = await fetchText(url)
+    const html = r.text.trim()
+    if (!r.ok || !html) return { html: '', finalUrl: r.url || url }
     const jsUrl = /window\.location\s*=\s*['"]([^'"]+)['"]/.exec(html)
     if (jsUrl) {
-      url = new URL(jsUrl[1], url).toString()
+      url = new URL(jsUrl[1], r.url || url).toString()
       continue
     }
-    return { html, finalUrl: url }
+    return { html, finalUrl: r.url || url }
   }
   return { html: '', finalUrl: url }
 }

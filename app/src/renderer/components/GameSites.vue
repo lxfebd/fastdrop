@@ -2,15 +2,16 @@
  * 游戏站页签：内嵌浏览器 + 搜索聚合 + 直链捕获。
  *
  * 左侧是站点列表与聚合搜索结果，右侧是 webview（partition=persist:gamesites，
- * 登录状态跨重启保持）。页面里点下载时，主进程捕获桥通过
- * push:download-captured 把真实文件 URL 推过来，这里弹确认后调 sitesAddTask。
+ * 登录状态跨重启保持）。页面里点下载时主进程的捕获桥负责分流，并把结果推到
+ * push:site-download：公开直链进 FastDrop 引擎、需要会话的链接交回浏览器下载。
+ * 订阅在 renderer/store.ts 里做（切走页签也不能丢消息），这里只管浏览与解析。
  *
  * webview 是 Electron 的 OOPIF，有自己的进程与会话；它在沙箱化渲染进程里
  * 也能用（webviewTag: true 在主进程开）。注意：webview 的 DOM 事件需要
  * 在元素上直接挂监听，不能用 Vue 的 @事件语法（部分事件不冒泡）。
  */
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import {
   ArrowLeftOutlined,
@@ -23,22 +24,37 @@ import {
 } from '@ant-design/icons-vue'
 import type {
   Mirror,
+  ResolveOutcome,
   SiteInfo,
   SiteMirrorOutcome,
   SiteSearchOutcome,
   SiteSearchResult,
 } from '../../shared/sites'
-import type { CapturedDownload } from '../../shared/ipc'
+import { GAMESITES_PARTITION } from '../../shared/sites'
 import type { WebviewElement } from '../webview'
+import { reportRejection } from '../store'
 
 const sites = ref<SiteInfo[]>([])
 const activeSiteId = ref<string>('gamer520')
 
 const searchKeyword = ref('')
-const searching = ref(false)
 const searchDone = ref(false)
-/** 每个站一列结果，聚合展示 */
-const resultsBySite = ref<Array<{ site: SiteInfo; outcome: SiteSearchOutcome }>>([])
+/** 每个站一列，各列独立结项（谁先回来谁先能看） */
+interface SiteGroup {
+  site: SiteInfo
+  /** 这一列是用哪个词搜的：「重试」重放的是它，不是输入框里的当前文字 */
+  kw: string
+  pending: boolean
+  outcome: SiteSearchOutcome | null
+}
+const resultsBySite = ref<SiteGroup[]>([])
+/** 还在跑的站点数。>0 只让按钮转圈，不禁用：新搜索会直接作废旧结果。 */
+const pendingCount = computed(() => resultsBySite.value.filter((g) => g.pending).length)
+/**
+ * 搜索序号。慢站回包时用户可能已经换词重搜，拿序号对一下才能把旧结果丢掉——
+ * 否则「playzip 20 秒后回来的那批结果」会盖在用户正在看的新结果上。
+ */
+let searchSeq = 0
 
 const webviewEl = ref<WebviewElement | null>(null)
 const address = ref('')
@@ -144,54 +160,122 @@ function openExternal(url: string): void {
 
 async function runSearch(): Promise<void> {
   const kw = searchKeyword.value.trim()
-  if (!kw || searching.value) return
-  searching.value = true
+  if (!kw) return
+  const seq = ++searchSeq
   searchDone.value = true
-  resultsBySite.value = []
+  resultsBySite.value = sites.value.map((site) => ({
+    site,
+    kw,
+    pending: true,
+    outcome: null,
+  }))
+  // 每站各走各的：谁先回来谁先上屏。以前是 Promise.all 一起结项，
+  // 一个站卡在重试里，另外两个早就搜到的结果也得陪着被藏起来。
+  await Promise.all(sites.value.map((site) => searchOne(seq, site, kw)))
+}
+
+async function searchOne(seq: number, site: SiteInfo, kw: string): Promise<void> {
+  let outcome: SiteSearchOutcome
   try {
-    // 并行搜所有站，返回顺序按注册表顺序排
-    const outcomes = await Promise.all(
-      sites.value.map(async (s) => ({
-        site: s,
-        outcome: await window.fd.sitesSearch(s.id, kw),
-      })),
-    )
-    resultsBySite.value = outcomes.sort(
-      (a, b) =>
-        sites.value.findIndex((s) => s.id === a.site.id) -
-        sites.value.findIndex((s) => s.id === b.site.id),
-    )
-  } catch {
-    message.warning('搜索失败，请重试')
-  } finally {
-    searching.value = false
+    outcome = await window.fd.sitesSearch(site.id, kw)
+  } catch (e) {
+    // 单站的异常就地摊开在这一列上，不弹全局红条：其它站的结果照样能用，
+    // 一句「操作失败」既盖不住信息也说不清是哪个站。
+    outcome = {
+      ok: false,
+      siteId: site.id,
+      message: `这次没能发起搜索：${e instanceof Error ? e.message : String(e)}`,
+    }
   }
+  if (seq !== searchSeq) return
+  const g = resultsBySite.value.find((x) => x.site.id === site.id)
+  if (!g) return
+  g.outcome = outcome
+  g.pending = false
+}
+
+/** 只重跑这一站。失败原因只属于这一次搜索，所以出口是「再来一次」而不是把站判死。 */
+function retrySite(g: SiteGroup): void {
+  const seq = searchSeq
+  g.pending = true
+  g.outcome = null
+  void searchOne(seq, g.site, g.kw)
 }
 
 // --------------------------------------------------------------- 镜像与解析
 
+/**
+ * 解析过程中的转圈用这个 key，进度靠同 key 原地替换文案；
+ * 最终结果另发一条（不带 key），收尾时不会把结果一起删掉。
+ */
+const LOADING_KEY = 'gamesites-mirror-loading'
+
+/**
+ * 一次「点结果 → 选镜像 → 解析网盘 → 排队入列」的完整过程是否正在进行。
+ * 网盘列目录能拖十几秒，而这段时间屏幕上什么都不动：用户以为没点上，
+ * 再点一次就会并发解析同一个分享页。
+ */
+const mirrorBusy = ref(false)
+
+function showProgress(text: string): void {
+  message.loading({ content: text, key: LOADING_KEY, duration: 0 })
+}
+
 /** 展开某条结果的下载镜像，弹给用户选。 */
 async function showMirrors(siteId: string, item: SiteSearchResult): Promise<void> {
-  const outcome: SiteMirrorOutcome = await window.fd.sitesMirrors(siteId, item.url)
-  if (!outcome.ok) {
-    message.warning(outcome.message ?? '解析失败')
+  if (mirrorBusy.value) {
+    // 连点时也要给句话。什么都不发生，用户读作「卡了」，然后继续点。
+    message.info({ content: '上一个链接还在解析，先等它出结果', key: 'gamesites-busy', duration: 2 })
     return
   }
-  const mirrors = outcome.mirrors ?? []
-  if (!mirrors.length) {
-    message.warning(outcome.message ?? '没有找到下载链接，请在浏览器里打开详情页。')
-    return
+  mirrorBusy.value = true
+  showProgress(`正在读取「${item.title}」的下载链接…`)
+  try {
+    let outcome: SiteMirrorOutcome
+    try {
+      outcome = await window.fd.sitesMirrors(siteId, item.url)
+    } catch (e) {
+      reportRejection(e)
+      return
+    }
+    if (!outcome.ok) {
+      message.destroy(LOADING_KEY)
+      message.warning(outcome.message ?? '解析失败')
+      return
+    }
+    const mirrors = outcome.mirrors ?? []
+    if (!mirrors.length) {
+      message.destroy(LOADING_KEY)
+      message.warning(outcome.message ?? '没有找到下载链接，请在浏览器里打开详情页。')
+      return
+    }
+    // 浮层是要用户做决定的，不是在进行中——转圈先收掉，别让他以为还在加载
+    message.destroy(LOADING_KEY)
+    const chosen = await pickMirror(item.title, mirrors)
+    if (!chosen) return
+    await handleMirror(chosen)
+  } finally {
+    message.destroy(LOADING_KEY)
+    mirrorBusy.value = false
   }
-  // 触发页面级交互（用 antd Modal.confirm 太糙，这里用一个简单列表浮层）
-  const chosen = await pickMirror(item.title, mirrors)
-  if (!chosen) return
-  await handleMirror(chosen)
 }
+
+/**
+ * 当前挂着的镜像浮层。
+ *
+ * 它是 createElement 出来的、直接贴在 document.body 上，不属于组件树——
+ * 组件卸载（用户切回「下载管理」）时 Vue 不会替我们摘掉它。以前浮层就那样
+ * 留在原地：一层全屏半透明遮罩盖住整个窗口，谁都点不动，只能重启软件。
+ */
+let activeMirrorHolder: HTMLElement | null = null
 
 /** 让用户在多镜像里选一个（浮层式选择）。 */
 function pickMirror(title: string, mirrors: Mirror[]): Promise<Mirror | null> {
   return new Promise((resolve) => {
+    // 同一时刻只该有一个浮层：上一个还挂着就先摘掉，避免遮罩叠遮罩
+    activeMirrorHolder?.remove()
     const holder = document.createElement('div')
+    activeMirrorHolder = holder
     holder.className = 'mirror-overlay'
     const box = document.createElement('div')
     box.className = 'mirror-box'
@@ -210,23 +294,20 @@ function pickMirror(title: string, mirrors: Mirror[]): Promise<Mirror | null> {
       const kind = row.querySelector('.m-kind')!
       kind.textContent = KIND_LABEL[m.kind] ?? m.kind
       row.querySelector('.m-name')!.textContent = m.note ? `${m.name}（${m.note}）` : m.name
-      row.addEventListener('click', () => {
-        holder.remove()
-        resolve(m)
-      })
+      row.addEventListener('click', () => close(m))
       list.appendChild(row)
     }
-    box.querySelector('.m-cancel')!.addEventListener('click', () => {
-      holder.remove()
-      resolve(null)
-    })
+    box.querySelector('.m-cancel')!.addEventListener('click', () => close(null))
     holder.addEventListener('click', (e) => {
-      if (e.target === holder) {
-        holder.remove()
-        resolve(null)
-      }
+      if (e.target === holder) close(null)
     })
     document.body.appendChild(holder)
+
+    function close(result: Mirror | null): void {
+      if (activeMirrorHolder === holder) activeMirrorHolder = null
+      holder.remove()
+      resolve(result)
+    }
   })
 }
 
@@ -251,27 +332,47 @@ async function handleMirror(m: Mirror): Promise<void> {
     message.info('已在页面中打开，请在页面里点击下载')
     return
   }
-  const outcome = await window.fd.sitesResolve(m)
+  showProgress(`正在解析 ${KIND_LABEL[m.kind]}「${m.name}」…`)
+  let outcome: ResolveOutcome
+  try {
+    outcome = await window.fd.sitesResolve(m)
+  } catch (e) {
+    reportRejection(e)
+    return
+  }
   if (outcome.ok && (outcome.files?.length || outcome.url)) {
-    // 一个分享常有多个文件（RAR 分卷），逐个入队，全成功才算成功
+    // 一个分享常有多个文件（RAR 分卷），逐个入队；失败的每一个都要报出来
     const list = outcome.files?.length
       ? outcome.files
       : [{ url: outcome.url!, filename: outcome.filename ?? '' }]
     let added = 0
-    for (const f of list) {
+    let dups = 0
+    const failed: string[] = []
+    for (let i = 0; i < list.length; i++) {
+      const f = list[i]!
+      if (list.length > 1) showProgress(`正在加入下载列表（${i + 1}/${list.length}）…`)
       try {
-        await window.fd.sitesAddTask({ url: f.url, filename: f.filename })
-        added++
+        const r = await window.fd.sitesAddTask({ url: f.url, filename: f.filename })
+        if (r.ok && !r.duplicate) added++
+        else if (r.ok) dups++
+        else failed.push(`${f.filename || '该文件'}：${r.error}`)
       } catch (e) {
-        message.error(`添加任务失败：${(e as Error).message}`)
+        reportRejection(e)
       }
     }
-    if (added > 0) {
-      message.success(added === 1 ? '已添加到 FastDrop 下载列表' : `已添加 ${added} 个分卷到下载列表`)
+    message.destroy(LOADING_KEY)
+    // 分享里的文件超过单次解析上限时会被截断。只报「还有 M 个未加入」等于把活儿
+    // 丢回给用户——他得自己找回那个分享页。这里直接把分享页摊到右侧浏览器里。
+    let note = outcome.message ?? ''
+    if ((outcome.missing ?? 0) > 0 && (m.kind === 'cloudreve' || m.kind === 'gofile')) {
+      nav(m.url)
+      note = note ? `${note}，已在右侧浏览器打开` : '剩余文件已在右侧浏览器打开'
     }
+    reportResolve(added, dups, failed, note)
     return
   }
   // 解析失败：网盘类回退到内嵌 webview，让用户用站点自带会话手动下载
+  message.destroy(LOADING_KEY)
   message.info(outcome.message ?? '该链接无法自动下载，请在页面里打开')
   if (m.kind === 'pan' || m.kind === 'gofile' || m.kind === 'cloudreve') {
     nav(m.url)
@@ -280,23 +381,34 @@ async function handleMirror(m: Mirror): Promise<void> {
   }
 }
 
-// --------------------------------------------------------------- 捕获桥
-
-/** 订阅主进程的捕获推送：webview 里下载真实文件时弹「添加到 FastDrop」。 */
-let unsubCapture: (() => void) | null = null
-onMounted(() => {
-  unsubCapture = window.fd.onDownloadCaptured(async (d: CapturedDownload) => {
-    const name = d.filename || d.url.split('/').pop() || '下载'
-    try {
-      await window.fd.sitesAddTask({ url: d.url, filename: d.filename })
-      message.success(`已添加：${name}`)
-    } catch {
-      message.warning(`无法自动添加 ${name}，请手动复制链接`)
-    }
+/**
+ * 把一次解析的结果合成一条提示。
+ *
+ * 分卷任务一多，逐条弹消息会变成几十条堆叠的 toast（用户只能看着它们排队消失），
+ * 所以这里汇总成一条；更要紧的是 outcome.message——主进程解析器在里面写的是
+ * 「共 N 个文件（还有 M 个文件未加入，可在分享页查看）」这种截断告知。
+ * 60 个分卷只下了一半却不说，用户拿到手才发现缺件。
+ */
+function reportResolve(added: number, dups: number, failed: string[], note?: string): void {
+  const parts: string[] = []
+  if (added) parts.push(added === 1 ? '已添加到下载列表' : `已添加 ${added} 个文件`)
+  if (dups) parts.push(`${dups} 个已在下载列表`)
+  if (failed.length) parts.push(`${failed.length} 个失败：${failed[0]}`)
+  if (note) parts.push(note)
+  if (!parts.length) parts.push('没有文件被加入下载列表')
+  const important = failed.length > 0 || !!note
+  message.open({
+    content: parts.join(' · '),
+    type: failed.length ? 'warning' : added ? 'success' : 'info',
+    // 截断告知和失败明细比「成功了」更需要读完，3 秒不够
+    duration: important ? 8 : 3,
   })
-})
+}
+
 onBeforeUnmount(() => {
-  unsubCapture?.()
+  // 浮层挂在 document.body 上，不随组件销毁；不主动摘掉就会留下一层吃掉全窗点击的遮罩
+  activeMirrorHolder?.remove()
+  activeMirrorHolder = null
 })
 </script>
 
@@ -324,8 +436,8 @@ onBeforeUnmount(() => {
           :placeholder="activeSite().searchPlaceholder"
           @keyup.enter="runSearch"
         />
-        <button class="g-go" :disabled="searching" @click="runSearch">
-          <SearchOutlined />
+        <button class="g-go" title="搜索" @click="runSearch">
+          <SearchOutlined :class="{ spin: pendingCount > 0 }" />
         </button>
       </div>
 
@@ -334,9 +446,18 @@ onBeforeUnmount(() => {
           <div v-for="g in resultsBySite" :key="g.site.id" class="g-group">
             <div class="g-group-title">
               {{ g.site.name }}
-              <span class="g-count">{{ g.outcome.results?.length ?? 0 }}</span>
+              <span v-if="g.pending" class="g-count">搜索中…</span>
+              <span v-else class="g-count">{{ g.outcome?.results?.length ?? 0 }}</span>
+              <button
+                v-if="!g.pending && g.outcome && !g.outcome.ok"
+                class="g-retry"
+                @click="retrySite(g)"
+              >
+                重试
+              </button>
             </div>
-            <template v-if="g.outcome.ok">
+            <div v-if="g.pending" class="g-empty">正在检索 {{ g.site.name }}…</div>
+            <template v-else-if="g.outcome?.ok">
               <div
                 v-if="g.outcome.results?.length"
                 class="g-result"
@@ -348,7 +469,7 @@ onBeforeUnmount(() => {
               </div>
               <div v-else class="g-empty">{{ g.outcome.message ?? '无结果' }}</div>
             </template>
-            <div v-else class="g-empty">{{ g.outcome.message }}</div>
+            <div v-else class="g-empty">{{ g.outcome?.message }}</div>
           </div>
         </template>
         <div v-else class="g-hint">输入关键词搜索三个站点，点结果解析下载链接。</div>
@@ -381,7 +502,7 @@ onBeforeUnmount(() => {
           ref="webviewEl"
           class="g-wv"
           :src="activeSite().home"
-          partition="persist:gamesites"
+          :partition="GAMESITES_PARTITION"
           allowpopups
         />
       </div>
@@ -397,8 +518,10 @@ onBeforeUnmount(() => {
   gap: 12px;
 }
 .g-side {
+  /* 侧栏只要放得下站点按钮和搜索框。原来 300px 把网页挤到 658px，
+     内嵌浏览器里那些站点本来就是按 1000px+ 排的，越窄越难读。 */
   flex: none;
-  width: 300px;
+  width: 252px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -410,11 +533,15 @@ onBeforeUnmount(() => {
 }
 .g-sites {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
 .g-site {
-  flex: 1;
+  /* 不拉伸：换行时最后一个按钮跟着文字宽度走，而不是摊满整行 */
+  flex: 0 1 auto;
   height: 32px;
+  padding: 0 8px;
+  white-space: nowrap;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -481,6 +608,22 @@ onBeforeUnmount(() => {
   font-size: 11px;
   color: var(--ant-color-text-quaternary);
 }
+/* 单站重试：贴在列头右端，只重跑这一列，不动其它站已出的结果 */
+.g-retry {
+  margin-left: auto;
+  height: 20px;
+  padding: 0 8px;
+  font-size: 11px;
+  color: var(--ant-color-text-secondary);
+  background: transparent;
+  border: 1px solid var(--ant-color-border);
+  border-radius: var(--ant-radius);
+  cursor: pointer;
+}
+.g-retry:hover {
+  color: var(--ant-color-primary);
+  border-color: var(--ant-color-primary);
+}
 .g-result {
   padding: 8px 10px;
   border: 1px solid var(--ant-color-border-secondary);
@@ -541,6 +684,12 @@ onBeforeUnmount(() => {
 }
 .g-addr {
   flex: 1;
+  /* 必须显式 min-width:0：<input> 的固有宽度约 183px，而 flex 项默认 min-width:auto
+     不允许缩到固有宽度以下。窗口拖到 820 以下时（minWidth 是 780，用户真能拖到），
+     地址栏顶住不让步，整条工具栏就要 359px，而面板只剩 300px——
+     实测「在浏览器中打开」按钮被推到视口外（right 867 > 视口 820），
+     连带 .shell 出现横向滚动。 */
+  min-width: 0;
   height: 30px;
   border: 1px solid var(--ant-color-border);
   border-radius: var(--ant-radius);

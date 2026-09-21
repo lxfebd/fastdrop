@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "FastDrop 下载助手",
+  "version": "1.0.0",
+  "description": "右键或点击下载链接，一键交给 FastDrop 游戏下载盒子（无需复制链接）",
+  "permissions": [
+    "contextMenus",
+    "nativeMessaging",
+    "downloads",
+    "notifications"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5M2uUJVPteKkhIm98v5+VheQVd7ME44p87LwKscqxpqVFHBZiPbrQNCIhjbe0cw8eYr1OiSj1KBQdxDPhgiACrxf+Ksi9Ufm0UHDwC4avOi1RYbGo7PWUctwIBo5tFr/eC7UQ9sITGlocH8RpNkIrp4DmhB+RuXN96nR69Vax1NESlfN9GW7FkWpbh2Df7RanZ8ETh3+rJj+P5hhKahNLqZ2R6OwDFCF+JEZ7J0cOwAoI0Vl/fu4mFyZFcL0b5ftCycPHnQOd4xtPLPasVxqy9O6paL2NpRBHLLvQdqzIctWcJFLgm9mpJs1M6Jb+EOYPTDPkTv/T2Uak8gCxTyxxwIDAQAB"
+}

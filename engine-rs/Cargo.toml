@@ -7,6 +7,12 @@ edition = "2021"
 name = "fastdrop-engine"
 path = "src/main.rs"
 
+# native messaging 宿主：浏览器扩展的本地通道。独立二进制，不依赖 Electron，
+# 打包进 resources/，manifest 的 "path" 指向它（见 hostRegister.ts）。
+[[bin]]
+name = "fastdrop-host"
+path = "src/host.rs"
+
 [profile.release]
 opt-level = 3
 lto = "thin"
@@ -14,8 +20,10 @@ codegen-units = 1
 strip = true
 
 [dependencies]
+# socks 特性不是可选项：设置里允许填 socks5://，缺了它 reqwest 会直接把代理串判成非法，
+# 用户看到的就变成「配了代理反而下不动」。
 reqwest = { version = "0.12", default-features = false, features = [
-    "http2", "stream", "rustls-tls-native-roots",
+    "http2", "stream", "rustls-tls-native-roots", "socks",
 ] }
 tokio = { version = "1", features = [
     "rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "io-std",
@@ -24,3 +32,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 futures-util = "0.3"
 percent-encoding = "2"
+sha2 = "0.10"
+sha1 = "0.10"
+md-5 = "0.10"

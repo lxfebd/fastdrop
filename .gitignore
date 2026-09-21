@@ -17,6 +17,8 @@ archive/
 
 # 引擎回归测试的临时下载目录（tests/test_engine_rs.py 每次跑都会重建）
 tests/_tmp_rs/
+# 代理链路端到端测试的临时目录（tests/test_proxy_e2e.py 每次跑都会重建）
+tests/_tmp_proxy/
 
 # AI 助手本地状态与一次性调试输出
 .zcode/
