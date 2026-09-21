@@ -411,6 +411,12 @@ UI 侧走真实验证：用 CDP（Chrome DevTools Protocol）连渲染进程读 
 
 瞬态类断言（浮层、转圈、矩形越界）失败时**先单跑一次再下结论**：实测过一轮假失败——多套 CDP 与被测窗口叠着跑时，被压住的窗口会被 Chromium 节流定时器与 rAF，于是默认 3 秒自消失的 `设置已保存` 提示几十秒后还挂在 DOM 上，看着就像「结项了转圈没收」。这类归因不清楚就不写成产品缺陷，也不许为了变绿直接放宽断言。
 
+## 发布与更新
+
+已发布 **v0.3.0**（浏览器扩展通道 + 应用内自动更新）——安装包从 [GitHub Releases](https://github.com/lxfebd/fastdrop/releases) 下载，应用内自动更新也指向同一处。
+
+发版流程已自动化：在 main 上 bump `app/package.json` 的 `version`，打 `v*` 标签推送，GitHub Actions 的 Release 工作流会在 Windows runner 上跑完回归门、打包 NSIS 安装包，并把 `.exe` + `latest.yml`（更新元数据）+ 引擎二进制一起传成 Release 资产。应用内更新靠的就是这份 `latest.yml`——旧版本检测到新版后自动下载、点「重启并安装」原地升级。
+
 ## 许可
 
 意图是 MIT，但仓库里目前还没有 `LICENSE` 文件——真正的 MIT 声明要写版权方名称，这一步得由你来定；补上之前，这里只算「未授权声明」而不是许可。
