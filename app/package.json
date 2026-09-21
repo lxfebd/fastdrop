@@ -16,17 +16,20 @@
     "typecheck": "vue-tsc --noEmit -p tsconfig.app.json && vue-tsc --noEmit -p tsconfig.node.json"
   },
   "devDependencies": {
+    "@ant-design/icons-vue": "^7.0.1",
     "@vitejs/plugin-vue": "^5.2.1",
     "@vue/tsconfig": "^0.7.0",
+    "ant-design-vue": "^4.2.6",
+    "dayjs": "^1.11.13",
     "electron": "44.1.0",
     "electron-builder": "^25.1.8",
     "electron-vite": "^2.3.0",
     "typescript": "~5.6.3",
     "vite": "^5.4.11",
-    "vue-tsc": "^2.1.10",
-    "@ant-design/icons-vue": "^7.0.1",
-    "ant-design-vue": "^4.2.6",
-    "dayjs": "^1.11.13",
-    "vue": "^3.5.13"
+    "vue": "^3.5.13",
+    "vue-tsc": "^2.1.10"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }

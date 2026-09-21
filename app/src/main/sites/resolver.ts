@@ -17,7 +17,7 @@
  *   可以直接喂给 Rust 引擎。
  */
 import type { Mirror, ResolvedFile, ResolveOutcome } from '../../shared/sites'
-import { getJson } from './http'
+import { fetchText, getJson, httpFailureMessage, networkLayerHint, parseJson } from './http'
 
 /** 常见网盘域名。命中这些的镜像无法转直链，返回明确提示。 */
 const PAN_HOSTS = [
@@ -61,9 +61,9 @@ async function resolveGofile(m: Mirror): Promise<ResolveOutcome> {
   try {
     let token: string | undefined
     for (const method of ['GET', 'POST'] as const) {
-      const res = await fetch('https://api.gofile.io/accounts', { method })
-      const j = (await res.json()) as { data?: { token?: string } }
-      if (j.data?.token) {
+      const r = await fetchText('https://api.gofile.io/accounts', { method, headers: { accept: 'application/json' } })
+      const j = (r.ok ? parseJson(r.text) : null) as { data?: { token?: string } } | null
+      if (j?.data?.token) {
         token = j.data.token
         break
       }
@@ -89,14 +89,40 @@ async function resolveGofile(m: Mirror): Promise<ResolveOutcome> {
       }
     }
     return { ok: false, message: 'gofile 文件夹需要 premium 或未公开，请在浏览器里打开。', mirrors: [m] }
-  } catch {
-    return { ok: false, message: 'gofile API 访问失败，请在浏览器里打开。', mirrors: [m] }
+  } catch (e) {
+    return { ok: false, message: `gofile API 访问失败：${reason(e)}。请在浏览器里打开。`, mirrors: [m] }
   }
 }
 
 // --------------------------------------------------------------- Cloudreve v4
 
-const CR_BASE = 'https://pan.nekogal.top/api/v4'
+/**
+ * 网盘 API 基址。FD_CLOUDREVE_BASE 只给离线回归门用（tests/test_proxy_e2e.py 起一个
+ * 假 Cloudreve，把「120 个文件截断成 60 个」这类只有大分享才会暴露的计数测出来）；
+ * 不设置就是真实分享域名。这条链全程匿名、不带任何 Cookie，所以指错地址也
+ * 泄露不了登录态。
+ */
+const CR_BASE = process.env.FD_CLOUDREVE_BASE ?? 'https://pan.nekogal.top/api/v4'
+
+/**
+ * 一次分享解析的收尾播报。
+ *
+ * 单独抽出来是因为这几行里有两处「吞掉信息」的老毛病：
+ * - 分享里的文件超过 CR_MAX_FILES 时只取了前面一截，不说的话用户要到解压才发现缺件；
+ * - 换直链失败的那几个（failed）以前完全不出现在任何提示里。
+ * missing 是给渲染层的机器可读计数（决定要不要把分享页摊回浏览器），别让它去读中文。
+ */
+export function crBundleNote(
+  shareName: string,
+  total: number,
+  extra: number,
+  failed: number
+): { message: string; missing: number } {
+  const note = extra > 0 ? `（还有 ${extra} 个文件未加入，可在分享页查看）` : ''
+  const failNote = failed > 0 ? `（另有 ${failed} 个文件取直链失败）` : ''
+  return { message: `${shareName} 共 ${total} 个文件${note}${failNote}`, missing: extra + failed }
+}
+
 const CR_MAX_DEPTH = 8
 const CR_PAGE_SIZE = 500
 const CR_MAX_FILES = 60
@@ -159,32 +185,46 @@ async function resolveCloudreve(m: Mirror): Promise<ResolveOutcome> {
       }
     }
 
-    const note = extra > 0 ? `（还有 ${extra} 个文件未加入，可在分享页查看）` : ''
-    const message = `${shareName} 共 ${files.length} 个文件${note}`
+    const { message, missing } = crBundleNote(shareName, files.length, extra, failed)
     const only = resolved[0]
     if (resolved.length === 1 && !failed && !extra) {
-      return { ok: true, url: only.url, filename: only.filename, size: only.size, message }
+      // 一个文件、全部成功：没有要告知的事，别把「共 1 个文件」当成结果播报刷在屏幕上
+      return { ok: true, url: only.url, filename: only.filename, size: only.size }
     }
-    return { ok: true, files: resolved, message }
-  } catch {
+    return { ok: true, files: resolved, message, missing }
+  } catch (e) {
     return {
       ok: false,
-      message: 'NekoGAL 网盘访问失败，请在浏览器里打开。',
+      message: `NekoGAL 网盘访问失败：${reason(e)}。请在浏览器里打开。`,
       mirrors: [{ kind: 'page', name: m.name, url: m.url }],
     }
   }
 }
 
+/**
+ * 失败原因。网络层的异常交给 networkLayerHint 分层（DNS/TCP/TLS/代理/超时），
+ * 已经写成人话的（HTTP 状态、返回的不是 JSON）原样带上——吞掉原因等于让用户
+ * 自己去猜该换网络、该配代理还是该重新分享。
+ */
+function reason(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e)
+  return /net::|ERR_|ECONN|ENOTFOUND|ETIMEDOUT|abort|超时|没有响应/i.test(msg) ? networkLayerHint(e) : msg
+}
+
 /** 列一个目录。uri 形如 cloudreve://OnPtr@share 或 ...@share/父目录名。 */
 async function crList(uri: string): Promise<CrEntry[]> {
-  const res = await fetch(`${CR_BASE}/file?uri=${encodeURIComponent(uri)}&page_size=${CR_PAGE_SIZE}`, {
+  const r = await fetchText(`${CR_BASE}/file?uri=${encodeURIComponent(uri)}&page_size=${CR_PAGE_SIZE}`, {
     headers: { accept: 'application/json' },
   })
-  const j = (await res.json()) as {
+  const why = httpFailureMessage(r)
+  if (why) throw new Error(`列目录 ${why}`)
+  const j = parseJson(r.text) as {
     code?: number
     msg?: string
     data?: { files?: Array<Partial<CrEntry>> }
-  }
+  } | null
+  // 网关/风控经常拿 HTML 冒充 JSON，不点破的话用户只会看到「访问失败」
+  if (!j) throw new Error(`列目录没有返回 JSON（HTTP ${r.status}，${r.contentType || '未知类型'}）`)
   if (j.code !== 0) throw new Error(j.msg ?? `code ${j.code} @ ${uri}`)
   return (j.data?.files ?? []).map((f) => ({
     type: f.type ?? 0,
@@ -209,13 +249,14 @@ async function crCollect(uri: string, acc: CrEntry[], depth: number): Promise<Cr
 
 /** 把文件 path 换成预签名直链（POST /file/url）。失败返回 null。 */
 async function crDirectUrl(path: string): Promise<string | null> {
-  const res = await fetch(`${CR_BASE}/file/url`, {
+  const r = await fetchText(`${CR_BASE}/file/url`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify({ uris: [path], download: true }),
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
   })
-  const j = (await res.json()) as { code?: number; data?: { urls?: Array<{ url?: string }> } }
-  return j.code === 0 ? (j.data?.urls?.[0]?.url ?? null) : null
+  if (!r.ok) return null
+  const j = parseJson(r.text) as { code?: number; data?: { urls?: Array<{ url?: string }> } } | null
+  return j?.code === 0 ? (j.data?.urls?.[0]?.url ?? null) : null
 }
 
 // --------------------------------------------------------------- 工具

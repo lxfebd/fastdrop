@@ -7,6 +7,14 @@
  * 不抛异常，UI 按 message 展示原因。
  */
 
+/**
+ * 游戏页签 webview 与主进程抓取层共用的会话分区。
+ *
+ * 必须是同一个常量而不是两边各写一遍字面量：抓取层复用的正是用户在这个分区里
+ * 的登录态，写错一个字就会出现「浏览器里能看到、解析层却被判成需要登录」。
+ */
+export const GAMESITES_PARTITION = 'persist:gamesites'
+
 /** 一个已注册的站点。id 同时是侧栏切换键和搜索路由的键。 */
 export interface SiteInfo {
   id: string
@@ -75,4 +83,10 @@ export interface ResolveOutcome {
   files?: ResolvedFile[]
   mirrors?: Mirror[]
   message?: string
+  /**
+   * 分享页里有多少文件没变成下载任务（超出单次解析上限、或换直链失败）。
+   * 渲染层靠这个数字决定「要不要把分享页摊给用户继续挑」，
+   * 不能靠读 message 里的中文措辞。
+   */
+  missing?: number
 }

@@ -38,6 +38,22 @@ export function fmtEta(seconds: number | null | undefined): string {
   return `${sec}s`
 }
 
+/**
+ * 区间的两端（已下 / 总计）。单位相同时只写一次："9.3 / 24.0 MB" 而不是
+ * "9.3 MB / 24.0 MB"。列表行的副标题只有两百多 px，省下的四个字符
+ * 刚好让速度和剩余时间不被省略号吃掉。
+ */
+export function fmtRange(a: number, b: number, digits = 1): string {
+  const sa = fmtSize(a, digits)
+  const sb = fmtSize(b, digits)
+  const ia = sa.indexOf(' ')
+  const ib = sb.indexOf(' ')
+  if (ia < 0 || ib < 0) return `${sa} / ${sb}`
+  return sa.slice(ia) === sb.slice(ib)
+    ? `${sa.slice(0, ia)} / ${sb}`
+    : `${sa} / ${sb}`
+}
+
 export function fmtProgress(p: number | null | undefined): string {
   if (p === null || p === undefined || !Number.isFinite(p)) return '0.0%'
   return `${(p * 100).toFixed(1)}%`

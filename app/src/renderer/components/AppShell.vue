@@ -11,19 +11,31 @@
  * 三个大区域（工具栏、任务表、详情）是独立白卡浮在灰底上，靠边界产生层级，
  * 而不是用 1px 线硬切。整窗同一色会让界面塌成一整块平面，那是初版的主要问题。
  */
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
   CaretRightFilled,
   DownOutlined,
   InfoCircleOutlined,
-  PauseOutlined,
   PlusOutlined,
-  ThunderboltFilled,
+  SearchOutlined,
 } from '@ant-design/icons-vue'
-import { Button, Empty, Modal } from 'ant-design-vue'
+import { Button, Checkbox, Dropdown, Empty, Input, Menu, MenuItem, message, Modal, Select } from 'ant-design-vue'
 import type { Settings, TaskRow } from '../../shared/types'
-import { fmtProgress, fmtSpeed } from '../../shared/format'
-import { matchesFilter } from '../status'
+import { DEFAULT_SETTINGS, isAutoResumable } from '../../shared/types'
+import type { UpdateStatus } from '../../shared/types'
+import { IDLE_UPDATE_STATUS } from '../../shared/types'
+import { fmtSize, fmtSpeed } from '../../shared/format'
+import {
+  matchesFilter,
+  matchesQuery,
+  percentText,
+  progressRatio,
+  rowName,
+  rowState,
+  sortRows,
+  SORT_OPTIONS,
+  type TaskSort,
+} from '../status'
 import Sidebar from './Sidebar.vue'
 // 类型也叫 TaskRow，组件起个别名避免同名冲突
 import TaskRowCard from './TaskRow.vue'
@@ -32,7 +44,7 @@ import NewDownloadDialog from './NewDownloadDialog.vue'
 import SettingsDialog from './SettingsDialog.vue'
 import ClockLabel from './ClockLabel.vue'
 import GameSites from './GameSites.vue'
-import { useAppStore } from '../store'
+import { useAppStore, report, reportRejection } from '../store'
 
 const store = useAppStore()
 const { state } = store
@@ -41,12 +53,102 @@ const { state } = store
 // 本地绑定——直接在模板写 __APP_VERSION__ 会被编译成 _ctx.__APP_VERSION__，拿不到值。
 const version = __APP_VERSION__
 
+// --------------------------------------------------------------- 应用更新
+
+/** 更新状态机：主进程推送 + 启动时查询初值，双保险。 */
+const update = ref<UpdateStatus>({ ...IDLE_UPDATE_STATUS })
+let offUpdate: (() => void) | null = null
+
+/** 按钮文案：不一样的状态给不一样的说法，避免「点击下载」「正在下载」混成一句话。 */
+const updateLabel = computed(() => {
+  switch (update.value.phase) {
+    case 'checking':
+      return { text: '检查更新中…', disabled: true }
+    case 'downloading':
+      return { text: `下载更新 ${Math.round((update.value.progress ?? 0) * 100)}%`, disabled: true }
+    case 'downloaded':
+      return { text: '重启并安装更新', disabled: false }
+    case 'available':
+      return { text: '发现新版本，正在准备…', disabled: true }
+    default:
+      return { text: '检查更新', disabled: false }
+  }
+})
+
+/** 更新状态是否值得占一条横条：检查/下载/已就绪才显示，idle 不占版面。 */
+const showUpdateBar = computed(
+  () => update.value.phase !== 'idle' && update.value.phase !== 'installing',
+)
+
+const updateBarText = computed(() => {
+  const u = update.value
+  if (u.phase === 'checking') return '正在检查应用更新…'
+  if (u.phase === 'downloading') {
+    const t = u.transferred ?? 0
+    const total = u.total ?? 0
+    return total > 0 ? `正在下载 v${u.version ?? ''} 更新 ${fmtSize(t)} / ${fmtSize(total)}` : `正在下载 v${u.version ?? ''} 更新…`
+  }
+  if (u.phase === 'downloaded') return `新版 v${u.version ?? ''} 已下载完成`
+  if (u.phase === 'installing') return '正在安装更新…'
+  return ''
+})
+
+/** 手动触发「立即检查」。开发版主进程会拒绝并回报「当前已是最新」，照实显示。 */
+async function checkUpdate(): Promise<void> {
+  try {
+    const r = await window.fd.checkUpdate()
+    if (!r.ok) message.info(r.error)
+  } catch (e) {
+    reportRejection(e)
+  }
+}
+
+/** 「重启并安装」：点了之后主进程立刻重启应用，没有回头路，先弹确认。 */
+async function installUpdate(): Promise<void> {
+  if (update.value.phase !== 'downloaded') return
+  message.info('正在重启以完成更新…')
+  try {
+    const r = await window.fd.installUpdate()
+    if (!r.ok) message.error(r.error)
+  } catch (e) {
+    reportRejection(e)
+  }
+}
+
+function onUpdateStatus(s: UpdateStatus): void {
+  update.value = s
+}
+
 // --------------------------------------------------------------- 派生数据
 
-/** 当前过滤条件下的行。规则见 status.ts 的 matchesFilter。 */
+/**
+ * 当前可见的行：状态桶 → 关键词 → 排序，三层都过一遍。
+ * 搜索和过滤是「与」关系（先筛桶再筛词），规则都在 status.ts，模板里不重复。
+ */
 const filteredRows = computed<TaskRow[]>(() =>
-  state.rows.filter((r) => matchesFilter(r.snap?.state, state.filter)),
+  sortRows(
+    state.rows.filter((r) => matchesFilter(r.snap?.state, state.filter) && matchesQuery(r, state.query)),
+    state.sort,
+  ),
 )
+
+/** 有任务但被桶/关键词挡住了：空态要给出「清掉筛选」的出口，而不是让人自己猜。 */
+const isFiltered = computed(() => state.filter !== 'all' || state.query.trim() !== '')
+
+/** 空态文案。搜索没命中时把词回显出来，用户才知道是自己筛掉了而不是任务丢了。 */
+const emptyText = computed(() => {
+  const q = state.query.trim()
+  if (q) return `没有匹配「${q}」的任务`
+  if (state.filter !== 'all') return '该分类下没有任务'
+  return '还没有下载任务'
+})
+
+/** 排序选项直接复用 status.ts 的定义，选择框和 sortRows() 永远同一套键。 */
+const sortOptions = SORT_OPTIONS
+
+function onSortChange(v: unknown): void {
+  store.setSort((v as TaskSort) ?? 'added-desc')
+}
 
 /** 侧栏/状态栏共用各状态计数。all 是全部任务数。 */
 const counts = computed(() => {
@@ -60,7 +162,12 @@ const counts = computed(() => {
   }
 })
 
-const countText = computed(() => `${counts.value.all} 个任务`)
+/** 计数在筛选状态下写成「可见 / 全部」，否则用户会以为任务少了一半。 */
+const countText = computed(() => {
+  const total = counts.value.all
+  if (!isFiltered.value) return `${total} 个任务`
+  return `${filteredRows.value.length} / ${total} 个任务`
+})
 
 /** 全部任务合计速度。没在跑时显示「空闲」，和老版一致。 */
 const speedText = computed(() => (state.totalSpeed > 0 ? fmtSpeed(state.totalSpeed) : '空闲'))
@@ -69,14 +176,35 @@ const selectedRow = computed<TaskRow | null>(() =>
   state.rows.find((r) => r.id === state.selectedId) ?? null,
 )
 
-/** 批量按钮只在有可操作对象时可用，否则空点一次白拉一趟 IPC。 */
-const hasRunning = computed(() => counts.value.downloading > 0)
-const hasRunnable = computed(
-  () =>
-    state.rows.some(
-      (r) => ['queued', 'paused', 'error', 'idle', 'cancelled'].includes(r.snap?.state ?? 'queued'),
-    ),
+/**
+ * 选中项必须落在当前可见行里，否则右侧详情卡会显示「还没有下载任务」——
+ * 明明列表有三行，用户只会认为软件读不到任务。切过滤桶、删掉选中行、
+ * 首次加载都走这一条规则：自动落到第一行。
+ */
+watch(
+  filteredRows,
+  (rows) => {
+    if (rows.some((r) => r.id === state.selectedId)) return
+    store.select(rows[0]?.id ?? null)
+  },
+  { immediate: true },
 )
+
+/**
+ * 批量按钮只在有可操作对象时可用，否则空点一次白拉一趟 IPC。
+ * 「全部开始」只做两件事：唤醒 paused、补上排队槽位（见 Manager.startAll），
+ * 所以按钮的可用条件必须和它一致——把 error/cancelled 算进来会变成
+ * 「按钮亮着但点了没反应」。失败任务要重试请走行上的「重新下载」。
+ */
+const hasRunning = computed(() => counts.value.downloading > 0)
+const hasRunnable = computed(() =>
+  state.rows.some((r) => {
+    const st = r.snap?.state ?? r.def.state
+    return st === 'paused' || isAutoResumable(st)
+  }),
+)
+/** 「重试全部失败」的可用性：走的是断点续传（start），不是清零重下。 */
+const hasFailed = computed(() => counts.value.error > 0)
 
 /** 状态栏左侧：正在跑的优先，其次暂停、失败。 */
 const statusLeft = computed(() => {
@@ -87,13 +215,16 @@ const statusLeft = computed(() => {
   return '就绪'
 })
 
-/** 状态栏中间：选中任务的文件名 + 进度。 */
+/**
+ * 状态栏中间：选中任务的文件名 + 进度。
+ * 未知长度时给破折号而不是 0.0%——那会让一个正在下的 8 GB 文件看起来毫无进展。
+ */
 const statusMid = computed(() => {
   const row = selectedRow.value
   if (!row || !row.snap) return ''
   const i = Math.max(row.def.dest.lastIndexOf('\\'), row.def.dest.lastIndexOf('/'))
   const name = (i >= 0 ? row.def.dest.slice(i + 1) : row.def.dest) || row.def.url
-  return `${name} · ${fmtProgress(row.snap.progress)}`
+  return `${name} · ${percentText(progressRatio(row.snap, row.def))}`
 })
 
 // --------------------------------------------------------------- 对话框
@@ -102,16 +233,24 @@ const showNew = ref(false)
 const showSettings = ref(false)
 const showAbout = ref(false)
 
-/** 保存设置面板里未提交的表单，SettingsDialog 内部也是从 settings 拷贝的。 */
-const settingsForm = reactive<Settings>({
-  threads: 8,
-  download_dir: '',
-  proxy: '',
-  user_agent: '',
-  max_concurrent: 3,
-  confirm_delete: true,
-  dark: true,
-})
+/**
+ * 游戏站视图挂载过一次就留着（详见模板里 v-if + v-show 那段注释）。
+ * immediate 是不把正确性押在「切到 games 一定发生在本组件挂载之后」这条时序上：
+ * 真出现那种情形时，用户看到的是这一整页空白，而不是少个动画。
+ */
+const gamesMounted = ref(false)
+watch(
+  () => state.filter,
+  (f) => {
+    if (f === 'games') gamesMounted.value = true
+  },
+  { immediate: true },
+)
+
+/** 保存设置面板里未提交的表单，SettingsDialog 内部也是从 settings 拷贝的。
+ *  从 DEFAULT_SETTINGS 拷而不是手写一份字面量：手写的那份每加一个字段就漏一个，
+ *  漏掉的字段主进程会回落到默认值，用户在界面上看到的是「改了没存」。 */
+const settingsForm = reactive<Settings>({ ...DEFAULT_SETTINGS })
 
 function openSettings(): void {
   if (state.settings) Object.assign(settingsForm, state.settings)
@@ -120,11 +259,21 @@ function openSettings(): void {
 
 async function saveSettings(s: Settings): Promise<void> {
   try {
-    await window.fd.saveSettings(s)
-    Object.assign(state.settings!, s)
+    // 采用主进程实际落盘的那份：非法值（线程数填 999）会被钳掉，
+    // 拿自己手上的对象覆盖 state 会让 UI 显示和磁盘不一致。
+    const res = await window.fd.saveSettings(s)
+    if (!res.ok) {
+      // 不关弹窗：失败的多半就是用户刚填的那一项（代理地址写错），
+      // 关掉再让他从头找一遍是折磨人。
+      message.error(res.error)
+      return
+    }
+    Object.assign(state.settings!, res.settings)
+    Object.assign(settingsForm, res.settings)
     showSettings.value = false
-  } catch {
-    // 保存失败不弹窗，下次轮询会重新拉取
+    message.success('设置已保存')
+  } catch (e) {
+    reportRejection(e)
   }
 }
 
@@ -139,67 +288,139 @@ function normalizeUrl(url: string): string {
   return /^https?:\/\//i.test(u) || /^ftp:\/\//i.test(u) ? u : `https://${u}`
 }
 
-async function onCreate(input: { url: string; dest: string; threads: number; note?: string }): Promise<void> {
+async function onCreate(input: {
+  url: string
+  dest: string
+  threads: number
+  note?: string
+  checksum?: string
+}): Promise<void> {
   showNew.value = false
   try {
-    await window.fd.addTask({
+    const r = await window.fd.addTask({
       url: normalizeUrl(input.url),
       dest: input.dest.trim(),
       threads: input.threads,
       note: input.note ?? '',
+      // 对话框里已经用 normalizeChecksum 判过一次，空串就是「不校验」。
+      checksum: input.checksum ?? '',
     })
+    // 失败要看得见：以前这里 catch 掉一切，用户点了「确定」什么也不会发生
+    if (!report(r, '任务已添加')) return
     store.setFilter('all')
     await store.refreshDefs()
-  } catch {
-    // 主进程会返回错误，这里不额外提示
+  } catch (e) {
+    reportRejection(e)
   }
 }
 
 async function clearFinished(): Promise<void> {
-  await window.fd.clearFinished()
+  try {
+    report(await window.fd.clearFinished())
+  } catch (e) {
+    reportRejection(e)
+  }
   store.select(null)
   await store.refreshDefs()
 }
 
 // --------------------------------------------------------------- 删除
 
-async function confirmRemove(): Promise<boolean> {
-  const s = state.settings
-  if (!s || !s.confirm_delete) return true
-  return new Promise<boolean>((resolve) => {
-    Modal.confirm({
-      title: '移除任务',
-      content: '确定要移除这个任务吗？磁盘上已下载的文件不会删除。',
-      okText: '移除',
-      okButtonProps: { danger: true },
-      cancelText: '取消',
-      onOk: () => resolve(true),
-      onCancel: () => resolve(false),
-    })
-  })
+/**
+ * 移除确认框。以前是一句「磁盘上已下载的文件不会删除」的纯文本弹窗，
+ * 想连文件一起删的人只能移除完再去文件夹里手动找——所以这里把选项摆进
+ * 对话框：默认不删文件（保守），勾了才删成品 + 断点。
+ *
+ * 用受控 Modal 而不是 Modal.confirm：后者要挂 h(Checkbox) 才能带复选框，
+ * 而勾选状态本身需要一处响应式来源，写在模板里比写在渲染函数里好读。
+ */
+const removeTarget = ref<string | null>(null)
+const deleteFiles = ref(false)
+
+function askRemove(id: string): void {
+  if (!state.settings?.confirm_delete) {
+    void doRemove(id, false)
+    return
+  }
+  deleteFiles.value = false
+  removeTarget.value = id
 }
 
-async function doAction(id: string, action: string): Promise<void> {
-  switch (action) {
-    case 'start':
-    case 'pause':
-      await window.fd.action(id, action)
-      break
-    case 'open':
-      await window.fd.openFolder(id)
-      break
-    case 'remove':
-      if (!(await confirmRemove())) return
-      if (state.selectedId === id) store.select(null)
-      await window.fd.removeTask(id)
-      break
-    default:
-      break
+async function doRemove(id: string, withFiles: boolean): Promise<void> {
+  if (state.selectedId === id) store.select(null)
+  removeTarget.value = null
+  try {
+    report(await window.fd.removeTask(id, withFiles))
+  } catch (e) {
+    reportRejection(e)
   }
   await store.refreshDefs()
 }
 
-function doNav(key: string): void {
+async function confirmRemoveModal(): Promise<void> {
+  if (removeTarget.value) await doRemove(removeTarget.value, deleteFiles.value)
+}
+
+/** 正在移除的那一行，用来在对话框里点名是哪个文件。 */
+const removeRow = computed<TaskRow | null>(
+  () => state.rows.find((r) => r.id === removeTarget.value) ?? null,
+)
+
+const removeName = computed(() => (removeRow.value ? rowName(removeRow.value) : ''))
+/** 说明「删文件」到底删什么、多大，以及删了会有什么后果：成品和断点分开讲。 */
+const removeFileInfo = computed(() => {
+  const r = removeRow.value
+  if (!r) return { desc: '', warn: '' }
+  const got = r.snap?.downloaded ?? r.def.downloaded ?? 0
+  const total = r.snap?.total || r.def.total || 0
+  if (rowState(r) === 'done') {
+    return { desc: `成品文件 ${fmtSize(total || got)}`, warn: '成品删掉后无法恢复。' }
+  }
+  if (got > 0) {
+    return { desc: `未完成的断点 ${fmtSize(got)}（.part）`, warn: '断点删掉之后无法续传，只能从头重下。' }
+  }
+  return { desc: '还没有落盘的文件', warn: '勾不勾都一样。' }
+})
+
+async function doAction(id: string, action: string): Promise<void> {
+  try {
+    switch (action) {
+      case 'start':
+      case 'pause':
+      case 'resume':
+        report(await window.fd.action(id, action))
+        break
+      case 'retry':
+        report(await window.fd.action(id, 'retry'), '已重新开始下载')
+        break
+      case 'open':
+        // 打开结果必须回报：以前 await 完什么都不说，资源管理器没弹出来时
+        // 用户只会以为「按钮坏了」。
+        report(await window.fd.openFolder(id))
+        break
+      case 'open-file':
+        report(await window.fd.openFile(id))
+        break
+      case 'remove':
+        askRemove(id)
+        break
+      default:
+        break
+    }
+  } catch (e) {
+    reportRejection(e)
+  }
+  await store.refreshDefs()
+}
+
+/** 批量动作：一次 IPC 打全表，按钮/菜单项的键和主进程 ALL_ACTIONS 对齐。 */
+const BATCH_KEYS = {
+  'start-all': 'start',
+  'pause-all': 'pause',
+  'retry-failed': 'retry-failed',
+} as const
+
+async function doNav(key: string): Promise<void> {
   switch (key) {
     case 'add':
       showNew.value = true
@@ -214,12 +435,21 @@ function doNav(key: string): void {
       // 游戏站是视图而非过滤器：切到该视图，不改 filter 桶
       store.setFilter('games')
       break
+    case 'clear-finished':
+      await clearFinished()
+      break
     case 'start-all':
-      window.fd.actionAll('start')
-      break
     case 'pause-all':
-      window.fd.actionAll('pause')
+    case 'retry-failed': {
+      const text = key === 'retry-failed' ? '已重新排队全部失败任务' : undefined
+      try {
+        report(await window.fd.actionAll(BATCH_KEYS[key]), text)
+      } catch (e) {
+        reportRejection(e)
+      }
+      await store.refreshDefs()
       break
+    }
     default:
       store.setFilter(key)
   }
@@ -227,6 +457,12 @@ function doNav(key: string): void {
 
 function delSelected(): void {
   if (state.selectedId) void doAction(state.selectedId, 'remove')
+}
+
+/** 清空搜索与状态桶，回到「全部」。空态里的「显示全部」走这一条。 */
+function clearFilters(): void {
+  store.setFilter('all')
+  store.setQuery('')
 }
 
 // --------------------------------------------------------------- 快捷键
@@ -238,9 +474,30 @@ function isEditable(el: EventTarget | null): boolean {
   return t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable
 }
 
+/**
+ * 聚焦搜索框。这里用 DOM 查询而不是模板 ref：ant-design-vue 的 Input 实例
+ * 类型上没有稳定的 focus() 声明，为了一个焦点动作把类型写成 any 不值当。
+ */
+function focusSearch(): void {
+  const el = document.getElementById('fd-search')
+  const input = el instanceof HTMLInputElement ? el : el?.querySelector('input')
+  input?.focus()
+  input?.select()
+}
+
 function onKeydown(e: KeyboardEvent): void {
-  if (isEditable(e.target)) return
   const mod = e.ctrlKey || e.metaKey
+  // Ctrl+F 和输入框无关，必须先判：光标正停在搜索框里时按 Ctrl+F 也要能清掉重打
+  if (mod && (e.key === 'f' || e.key === 'F')) {
+    e.preventDefault()
+    focusSearch()
+    return
+  }
+  if (e.key === 'Escape' && state.query) {
+    store.setQuery('')
+    return
+  }
+  if (isEditable(e.target)) return
   if (mod && (e.key === 'n' || e.key === 'N')) {
     e.preventDefault()
     doNav('add')
@@ -258,29 +515,71 @@ function onKeydown(e: KeyboardEvent): void {
 
 onMounted(() => {
   window.addEventListener('keydown', onKeydown)
+  // 更新状态：先订阅再查询初值，避免查询结果把订阅期间到达的推送覆盖掉。
+  offUpdate = window.fd.onUpdateStatus(onUpdateStatus)
+  void window.fd.updateStatus().then(onUpdateStatus).catch(() => {})
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
+  offUpdate?.()
 })
 </script>
 
 <template>
   <div class="shell">
+    <!-- 更新状态条：检查/下载/已就绪时占一行，idle 整个消失不打扰 -->
+    <div v-if="showUpdateBar" class="updatebar">
+      <span class="ub-text">{{ updateBarText }}</span>
+      <Button
+        v-if="update.phase === 'downloaded'"
+        type="primary"
+        size="small"
+        @click="installUpdate"
+      >
+        重启并安装
+      </Button>
+    </div>
+
     <div class="body">
       <Sidebar :rows="state.rows" :filter="state.filter" @nav="doNav" />
 
       <main class="right">
-        <!-- 游戏站视图：占满右侧，不显示任务列表 -->
-        <GameSites v-if="state.filter === 'games'" />
+        <!-- 游戏站视图：占满右侧，不显示任务列表。
+             两个指令各管一件事，缺一不可：
+             - v-if 是「第一次进来才挂载」：webview 的 src 一挂载就会真去加载站点首页，
+               无条件挂载等于每次启动应用都在后台加载三个站点的页面；
+             - v-show 是「之后只藏不销毁」：切回下载列表再切回来，搜索结果、
+               内嵌浏览器已经打开的页面和站点登录会话都得还在。以前这里只有 v-if，
+               组件被销毁重建，用户看到的就是「一切页签什么都白重来」。 -->
+        <GameSites v-if="gamesMounted" v-show="state.filter === 'games'" />
 
-        <template v-else>
-          <!-- 工具栏：左标题与计数，右批量操作。动作按钮从这里进，侧栏只管导航与过滤 -->
+        <template v-if="state.filter !== 'games'">
+          <!-- 工具栏：左标题计数 + 搜索排序，右速度 + 新建 + 批量菜单。
+               四个批量按钮平铺时 1080px 窗口放不下（名称列会被挤成省略号），
+               收进「批量操作」下拉后右侧只剩两个按钮，宽度终于稳定。 -->
         <div class="toolbar">
           <div class="tb-left">
             <span class="title">下载管理</span>
             <span class="tb-sep" />
             <span class="count">{{ countText }}</span>
+            <span id="fd-search" class="tb-search">
+              <Input
+                v-model:value="state.query"
+                size="small"
+                placeholder="搜索名称或链接 (Ctrl+F)"
+                allow-clear
+              >
+                <template #prefix><SearchOutlined /></template>
+              </Input>
+            </span>
+            <Select
+              :value="state.sort"
+              size="small"
+              :options="sortOptions"
+              class="tb-sort"
+              @change="onSortChange"
+            />
           </div>
           <div class="tb-right">
             <span class="speed" :class="{ idle: state.totalSpeed <= 0 }">{{ speedText }}</span>
@@ -289,31 +588,39 @@ onBeforeUnmount(() => {
                 <template #icon><PlusOutlined /></template>
                 新建下载
               </Button>
-              <Button type="text" size="small" :disabled="!hasRunning" @click="doNav('pause-all')">
-                <template #icon><PauseOutlined /></template>
-                全部暂停
-              </Button>
-              <Button type="text" size="small" :disabled="!hasRunnable" @click="doNav('start-all')">
-                <template #icon><CaretRightFilled /></template>
-                全部开始
-              </Button>
-              <Button type="text" size="small" :disabled="!counts.done" @click="clearFinished">
-                <template #icon><ThunderboltFilled /></template>
-                清空已完成
-              </Button>
+              <Dropdown :trigger="['click']">
+                <Button type="text" size="small">
+                  批量操作
+                  <template #icon><DownOutlined /></template>
+                </Button>
+                <template #overlay>
+                  <Menu>
+                    <MenuItem :disabled="!hasRunnable" @click="doNav('start-all')">
+                      <CaretRightFilled /> 全部开始
+                    </MenuItem>
+                    <MenuItem :disabled="!hasRunning" @click="doNav('pause-all')">
+                      全部暂停
+                    </MenuItem>
+                    <MenuItem :disabled="!hasFailed" @click="doNav('retry-failed')">
+                      重试全部失败（从断点续传）
+                    </MenuItem>
+                    <MenuItem :disabled="!counts.done" @click="clearFinished()">
+                      清空已完成
+                    </MenuItem>
+                  </Menu>
+                </template>
+              </Dropdown>
             </div>
           </div>
         </div>
 
         <div class="split">
           <section class="panel list-panel">
-            <!-- 表头与行共用同一套列宽，靠 padding 对齐而不是再写一遍宽度 -->
+            <!-- 表头与行共用 .split 上的 --col-* 变量，宽度只有一处定义 -->
             <div class="th">
+              <span class="c-ic" />
               <span class="c-name">名称</span>
-              <span class="c-size">大小</span>
-              <span class="c-bar" />
-              <span class="c-pct">进度</span>
-              <span class="c-spd">速度</span>
+              <span class="c-prog">进度</span>
               <span class="c-tag">状态</span>
               <span class="c-act" />
             </div>
@@ -329,8 +636,17 @@ onBeforeUnmount(() => {
                   @action="(a: string) => doAction(r.id, a)"
                 />
               </template>
+              <!-- 三种空态必须分开：「列表本来就是空的」和「搜索没命中」
+                   需要的下一步动作完全不同。 -->
               <div v-else class="empty-wrap">
-                <Empty description="该分类下没有任务" />
+                <Empty :description="emptyText">
+                  <Button v-if="isFiltered" size="small" @click="clearFilters">
+                    显示全部任务
+                  </Button>
+                  <Button v-else type="primary" size="small" @click="doNav('add')">
+                    新建下载
+                  </Button>
+                </Empty>
               </div>
             </div>
           </section>
@@ -339,7 +655,9 @@ onBeforeUnmount(() => {
             <DetailPanel
               :def="selectedRow?.def ?? null"
               :snap="selectedRow?.snap ?? null"
+              :has-tasks="state.rows.length > 0"
               @add="doNav('add')"
+              @action="(a: string) => selectedRow && doAction(selectedRow.id, a)"
             />
           </section>
         </div>
@@ -378,6 +696,27 @@ onBeforeUnmount(() => {
       <SettingsDialog :settings="settingsForm" @save="saveSettings" />
     </Modal>
 
+    <!-- 移除确认：把「要不要连文件一起删」变成可见的勾选，默认不删 -->
+    <Modal
+      :open="!!removeTarget"
+      title="移除任务"
+      ok-text="移除"
+      cancel-text="取消"
+      :width="440"
+      :ok-button-props="{ danger: true }"
+      @ok="confirmRemoveModal"
+      @cancel="removeTarget = null"
+    >
+      <div class="rm">
+        <div class="rm-name">{{ removeName }}</div>
+        <div class="rm-hint">默认只移除列表里的记录，磁盘上的文件保持不动。</div>
+        <Checkbox v-model:checked="deleteFiles">同时删除磁盘上的文件</Checkbox>
+        <div v-if="deleteFiles" class="rm-warn">
+          将删除 {{ removeFileInfo.desc }}。{{ removeFileInfo.warn }}
+        </div>
+      </div>
+    </Modal>
+
     <Modal v-model:open="showAbout" :footer="null" :width="420" @cancel="showAbout = false">
       <div class="about">
         <div class="about-head">
@@ -394,6 +733,13 @@ onBeforeUnmount(() => {
         <div class="about-foot">
           <InfoCircleOutlined /> Rust 引擎 · Vue 界面 · Electron 外壳
         </div>
+        <div class="about-update">
+          <Button size="small" :disabled="updateLabel.disabled" @click="checkUpdate">
+            {{ updateLabel.text }}
+          </Button>
+          <span v-if="updateBarText" class="about-update-text">{{ updateBarText }}</span>
+          <span v-if="update.error" class="about-update-err">{{ update.error }}</span>
+        </div>
       </div>
     </Modal>
   </div>
@@ -407,6 +753,24 @@ onBeforeUnmount(() => {
   height: 100vh;
   background: var(--ant-color-bg-layout);
   overflow: hidden;
+}
+/* 更新状态条：浮在内容上方的小横条，下载/已就绪时通知用户，不需要时整条消失 */
+.updatebar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 16px;
+  background: var(--ant-color-primary-bg);
+  border-bottom: 1px solid var(--ant-color-primary-border);
+  font-size: 12px;
+  color: var(--ant-color-primary);
+}
+.ub-text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .body {
   flex: 1;
@@ -480,9 +844,60 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 4px;
 }
+/* 搜索与排序都是工具栏里的辅助控件：给固定宽度，窄窗口下靠 tb-left 自己的
+   min-width/省略号收，不把「新建下载」挤出工具栏。 */
+.tb-search {
+  flex: none;
+  width: 210px;
+}
+.tb-sort {
+  flex: none;
+  width: 112px;
+}
+/* 工具栏在窄窗口下先让搜索框瘦身，保证「新建下载」永远在可视区内 */
+@media (max-width: 1220px) {
+  .tb-search {
+    width: 150px;
+  }
+}
+
+/* ---------- 移除确认 ---------- */
+.rm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 4px;
+}
+.rm-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ant-color-text);
+  word-break: break-all;
+}
+.rm-hint {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--ant-color-text-tertiary);
+}
+.rm-warn {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--ant-color-warning);
+}
 
 /* ---------- 内容分栏：左表右详情，两块独立白卡 ---------- */
+/*
+ * 列宽变量。表头和 TaskRow 的行都读这里，宽度只有一份定义。
+ * 只有「名称」会伸缩，其余列定宽——定宽列之和 + 最小名称宽度必须容得下
+ * 最窄窗口（1080px 时列表面板约 490px），否则行会撑破面板，出现横向滚动条，
+ * 右侧的状态和操作就被裁没了。
+ */
 .split {
+  --col-ic: 20px;
+  --col-prog: 144px;
+  --col-tag: 64px;
+  --col-act: 112px;
+  --col-gap: 10px;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -496,13 +911,21 @@ onBeforeUnmount(() => {
   flex-direction: column;
   overflow: hidden;
 }
+/* 列表面板同时是容器查询的基准：窄到放不下状态列时由行组件自己收掉它 */
 .list-panel {
   flex: 1;
   min-width: 0;
+  container: fdlist / inline-size;
 }
 .detail-panel {
   flex: none;
-  width: 380px;
+  width: 320px;
+}
+/* 宽窗口才有资格给详情卡更多呼吸空间 */
+@media (min-width: 1500px) {
+  .detail-panel {
+    width: 380px;
+  }
 }
 
 /* ---------- 任务表 ---------- */
@@ -510,8 +933,8 @@ onBeforeUnmount(() => {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 12px;
+  gap: var(--col-gap);
+  padding: 0 10px;
   height: 34px;
   background: var(--ant-color-fill-panel);
   border-bottom-style: solid;
@@ -523,48 +946,43 @@ onBeforeUnmount(() => {
 .list {
   flex: 1;
   min-height: 0;
+  /* 只允许纵向滚动。横向溢出曾经来自定宽列之和超过面板宽度，
+     现在列宽自适应了，这里显式关掉，杜绝再出现那条裁按钮的滚动条。 */
   overflow-y: auto;
+  overflow-x: hidden;
 }
 .empty-wrap {
   padding: 72px 0;
 }
 
-/* 表头列宽。行组件的 .cell-* 必须与这里一一对应，改宽度时两处一起改 */
+/* 表头列。宽度全部引用 --col-*，与 TaskRow 的 .cell-* 一一对应 */
+.c-ic {
+  flex: none;
+  width: var(--col-ic);
+}
 .c-name {
-  flex: none;
-  width: 268px;
-  min-width: 0;
-  padding-left: 36px;
-  box-sizing: border-box;
-}
-.c-size {
-  flex: none;
-  width: 68px;
-  text-align: right;
-}
-.c-bar {
   flex: 1;
   min-width: 0;
 }
-.c-pct {
+.c-prog {
   flex: none;
-  width: 52px;
-  text-align: right;
-}
-.c-spd {
-  flex: none;
-  width: 84px;
+  width: var(--col-prog);
   text-align: right;
 }
 .c-tag {
   flex: none;
-  width: 86px;
+  width: var(--col-tag);
   text-align: center;
 }
 .c-act {
   flex: none;
-  width: 120px;
+  width: var(--col-act);
   text-align: right;
+}
+@container fdlist (max-width: 560px) {
+  .c-tag {
+    display: none;
+  }
 }
 
 /* ---------- 状态栏 ---------- */
@@ -657,5 +1075,20 @@ onBeforeUnmount(() => {
   gap: 8px;
   font-size: 12px;
   color: var(--ant-color-text-tertiary);
+}
+.about-update {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ant-color-border-secondary);
+}
+.about-update-text {
+  font-size: 12px;
+  color: var(--ant-color-text-secondary);
+}
+.about-update-err {
+  font-size: 12px;
+  color: var(--ant-color-error);
 }
 </style>

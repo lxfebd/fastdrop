@@ -23,16 +23,26 @@ files:
   #
   # 注意这里**故意没有** node_modules。electron-vite 已经把 vue、antd-vue、
   # dayjs、icons 全量打进 out/renderer/assets/（渲染产物是单文件 bundle，
-  # 里面没有任何外部 import；out/main 和 out/preload 也只 require electron
-  # 和 node: 内置模块）。运行时完全不解析 node_modules，把它一起打包纯粹是
-  # 白白多出 66 MB 的 ant-design-vue 全量 locale + TS 声明。
+  # 里面没有任何外部 import）；out/main 和 out/preload 也只 import electron
+  # 和 node: 内置模块（electron-updater 连同它的依赖全被内联进 out/main/index.js，
+  # 运行时完全不解析 node_modules）。把它一起打包纯粹是白白多出几十 MB。
   # 之前那行 `- node_modules/**/*` 让 asar 从 27 MB 膨胀到 93 MB。
+  # 即使 dependencies 里有 electron-updater，electron-builder 的「smart 依赖
+  # 收集」也会想把它塞进 asar——这里显式排除，和上面的注释保持一致。
   - out/**/*
   - package.json
+  - '!node_modules/**/*'
 
 extraResources:
   - from: ../engine-rs/target/release/fastdrop-engine.exe
     to: fastdrop-engine.exe
+    filter:
+      - "**/*"
+  # native messaging 宿主（浏览器扩展的本地通道）：独立 Rust 二进制，
+  # manifest 的 "path" 指向它（见 hostRegister.ts）。不能是 Electron 自己——
+  # 见 src/main/hostRegister.ts 文件头对「为什么独立 host」的解释。
+  - from: ../engine-rs/target/release/fastdrop-host.exe
+    to: fastdrop-host.exe
     filter:
       - "**/*"
 
@@ -47,3 +57,12 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
+
+# 应用内自动更新（electron-updater）的发布源。electron-builder 打包时会据此
+# 生成 latest.yml（更新元数据）放在 release/ 下，随安装包一起传 GitHub Release。
+# 发布配置与仓库地址保持一致：改了 owner/repo，旧版应用的更新检查会落到
+# 不存在的地址，全部在后台静默失败。
+publish:
+  provider: github
+  owner: lxfebd
+  repo: fastdrop

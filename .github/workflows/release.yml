@@ -60,6 +60,17 @@ jobs:
         working-directory: app
         run: node node_modules/electron/install.js
 
+      # 打包前先跑两个离线回归门（都只连本机、不访问任何真实站点）：
+      # - 引擎 12+ 用例的 md5/分段/续传回归；
+      # - 代理链路端到端（含「改完代理点继续下载必须真的换出口」这条自救路径）。
+      # 放在打包之前：装安装包打出来才发现引擎或代理链路是坏的，等于白发布一次。
+      # 这里能跑 Electron 是因为 windows-latest 自带桌面会话，且上一步已经确认
+      # dist/electron.exe 存在。
+      - name: Offline regression gates
+        run: |
+          python tests/test_engine_rs.py
+          python tests/test_proxy_e2e.py
+
       # electron-builder.yml 的 extraResources 会把引擎打成普通文件放进
       # resources/（asar 里 spawn 不了子进程，必须落盘），这一步就是产出
       # 官方 Windows 安装包的唯一入口。
@@ -70,7 +81,10 @@ jobs:
       - name: Upload Release assets
         uses: softprops/action-gh-release@v2
         with:
+          # app/release/* 包含 nsis 安装包 + latest.yml（electron-updater 的
+          # 更新元数据，没有它应用内自动更新就找不到新版本）。
           files: |
             app/release/*.exe
+            app/release/latest.yml
             engine-rs/target/release/fastdrop-engine.exe
           generate_release_notes: true

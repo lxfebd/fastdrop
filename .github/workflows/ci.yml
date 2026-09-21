@@ -44,6 +44,11 @@ jobs:
         working-directory: engine-rs
         run: cargo build --release
 
+      # 区间解析与 set_threads 进度重摊的纯单元测试：端到端测试只看得到整体结果，
+      # 这两处算法的边界（Content-Range 起点不符、重叠区求交集）在这里逐个钉住。
+      - name: Engine unit tests
+        run: cargo test --release --manifest-path engine-rs/Cargo.toml
+
       # 引擎端到端测试：纯 stdlib + 本地 HTTP，不联网，任何平台都能跑
       - name: Engine regression tests
         run: python3 tests/test_engine_rs.py
