@@ -417,6 +417,3 @@ UI 侧走真实验证：用 CDP（Chrome DevTools Protocol）连渲染进程读 
 
 发版流程已自动化：在 main 上 bump `app/package.json` 的 `version`，打 `v*` 标签推送，GitHub Actions 的 Release 工作流会在 Windows runner 上跑完回归门、打包 NSIS 安装包，并把 `.exe` + `latest.yml`（更新元数据）+ 引擎二进制一起传成 Release 资产。应用内更新靠的就是这份 `latest.yml`——旧版本检测到新版后自动下载、点「重启并安装」原地升级。
 
-## 许可
-
-意图是 MIT，但仓库里目前还没有 `LICENSE` 文件——真正的 MIT 声明要写版权方名称，这一步得由你来定；补上之前，这里只算「未授权声明」而不是许可。
